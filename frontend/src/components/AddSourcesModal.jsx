@@ -10,6 +10,12 @@ function AddSourcesModal({
   isBusy,
   isDragging
 }) {
+  const displayFileName = pdfFile
+    ? pdfFile.name.length > 60
+      ? `${pdfFile.name.slice(0, 60)}...`
+      : pdfFile.name
+    : 'No file selected'
+
   const onDragOver = (e) => {
     e.preventDefault()
   }
@@ -101,12 +107,16 @@ function AddSourcesModal({
 
               <label htmlFor="pdf-source" className="file-chooser" aria-hidden={isBusy}>
                 <div className="upload-placeholder">
-                  <div className="upload-icon">📄</div>
-                  <div className="upload-text">
-                    <strong>Drag & drop a file here</strong>
-                    <div className="muted">or click to choose a file</div>
+                  <div className="upload-main-row">
+                    <div className="upload-icon">📄</div>
+                    <div className="upload-text">
+                      <strong>Drag & drop a file here</strong>
+                      <div className="muted">or click to choose a file</div>
+                    </div>
                   </div>
-                  <div className="file-name">{pdfFile ? pdfFile.name : 'No file selected'}</div>
+                  <div className="file-name" title={pdfFile ? pdfFile.name : 'No file selected'}>
+                    {displayFileName}
+                  </div>
                 </div>
               </label>
             </div>

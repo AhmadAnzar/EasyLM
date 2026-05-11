@@ -10,14 +10,14 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_huggingface import HuggingFaceEmbeddings
+import requests
 from langchain_openai import ChatOpenAI
 from openai import BadRequestError
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from prompts import RAG_SYSTEM_PROMPT
 
-app = FastAPI(title="Assignment 03 - The Final API Frontier")
+app = FastAPI(title="Assignment 03 - RAG")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,17 +41,100 @@ def _load_env_file(path: str = ".env"):
 
 _load_env_file()
 
-embeddings = None
+def _voyage_api_request(payload: dict):
+    api_key = os.environ.get("VOYAGE_API_KEY")
+    if not api_key:
+        raise RuntimeError("VOYAGE_API_KEY is not set in the environment.")
 
-def _get_embeddings():
-    global embeddings
-    if embeddings is None:
-        print("Loading embeddings model...")
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
-        print("Embeddings model loaded.")
-    return embeddings
+    # Use the officially documented Voyage AI embeddings endpoint by default.
+    # Official docs indicate: POST https://api.voyageai.com/v1/embeddings
+    url = os.environ.get("VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@app.on_event("startup")
+def _startup_checks():
+    """Print diagnostic info about the Voyage endpoint and basic connectivity.
+
+    This runs at application startup and logs:
+    - The endpoint being used
+    - Whether `VOYAGE_API_KEY` is set
+    - DNS resolution result (addresses) for the endpoint host
+    - A lightweight connectivity check (HEAD request) and concise error if it fails
+    """
+    import urllib.parse
+    voyage_url = os.environ.get("VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings")
+    print(f"Voyage endpoint configured: {voyage_url}")
+    api_key_set = bool(os.environ.get("VOYAGE_API_KEY"))
+    print(f"VOYAGE_API_KEY set: {api_key_set}")
+
+    try:
+        parsed = urllib.parse.urlparse(voyage_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            addrs = [ai[4][0] for ai in __import__("socket").getaddrinfo(host, port)]
+            unique_addrs = sorted(set(addrs))
+            print(f"DNS resolution for {host}: {unique_addrs}")
+        except Exception as dns_e:
+            print(f"DNS resolution failed for {host}: {dns_e}")
+
+        # Lightweight connectivity check
+        import requests
+        try:
+            resp = requests.head(voyage_url, timeout=5)
+            print(f"Connectivity check to Voyage endpoint: status={resp.status_code}")
+        except Exception as conn_e:
+            print(f"Voyage connectivity check failed: {conn_e}")
+    except Exception as e:
+        print(f"Startup diagnostics failed: {e}")
+
+
+def get_embedding(text: str):
+    """Return a single embedding vector for `text` using Voyage AI."""
+    if isinstance(text, (list, tuple)):
+        raise ValueError("get_embedding expects a single string. Use get_embeddings_batch for lists.")
+    payload = {"model": "voyage-2", "input": text}
+    data = _voyage_api_request(payload)
+
+    # Try common response shapes: {data:[{embedding: [...]}, ...]} or {embedding: [...]}
+    if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+        first = data["data"][0]
+        if isinstance(first, dict) and "embedding" in first:
+            return first["embedding"]
+    if isinstance(data, dict) and "embedding" in data:
+        return data["embedding"]
+
+    raise RuntimeError("Unexpected response from Voyage API when requesting embedding.")
+
+
+def get_embeddings_batch(texts: list[str]):
+    """Return list of embedding vectors for a list of texts using Voyage AI.
+
+    This attempts to send the full list in one request; if the API doesn't
+    support batching, it will fall back to per-item requests.
+    """
+    if not texts:
+        return []
+
+    payload = {"model": "voyage-2", "input": texts}
+    data = _voyage_api_request(payload)
+    # expected: {data: [{embedding: [...]}, ...]}
+    if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+        embeddings = []
+        for item in data["data"]:
+            if isinstance(item, dict) and "embedding" in item:
+                embeddings.append(item["embedding"])
+            else:
+                raise RuntimeError("Unexpected batch item shape from Voyage API")
+        return embeddings
+
+    # If API returned unexpected shape, raise so caller sees error
+    raise RuntimeError("Unexpected response from Voyage API for batch embeddings.")
 
 if not os.environ.get("GITHUB_TOKEN"):
     print("Warning: GITHUB_TOKEN is missing.")
@@ -146,18 +229,20 @@ def _index_documents(docs, source_name: str, upload_type: str):
     except Exception:
         pass
 
+    chunk_texts = [doc.page_content for doc in chunks]
+    print("Requesting embeddings from Voyage AI...")
+    chunk_vectors = get_embeddings_batch(chunk_texts)
+    print("Embeddings received from Voyage AI.")
+
+    # ensure collection exists with correct vector size
+    vector_size = len(chunk_vectors[0]) if chunk_vectors else 0
     client.create_collection(
         collection_name=QDRANT_COLLECTION,
         vectors_config=VectorParams(
-            size=len(_get_embeddings().embed_query("vector-size-probe")),
+            size=vector_size,
             distance=Distance.COSINE,
         ),
     )
-
-    chunk_texts = [doc.page_content for doc in chunks]
-    print("Creating embeddings...")
-    chunk_vectors = _get_embeddings().embed_documents(chunk_texts)
-    print("Embeddings created.")
 
     points = []
     for index, (chunk, vector) in enumerate(zip(chunks, chunk_vectors)):
@@ -243,7 +328,10 @@ async def upload_text(payload: TextUploadRequest):
 
 @app.post("/query")
 async def query_document(req: QueryRequest):
-    query_vector = _get_embeddings().embed_query(req.query)
+    try:
+        query_vector = get_embedding(req.query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error embedding query: {e}")
     try:
         search_result = _search_qdrant(query_vector, TOP_K)
     except Exception as e:

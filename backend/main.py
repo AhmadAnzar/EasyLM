@@ -4,6 +4,7 @@ import shutil
 import tempfile
 from uuid import uuid4
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_community.document_loaders import PyPDFLoader
@@ -16,6 +17,7 @@ from openai import BadRequestError
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from prompts import RAG_SYSTEM_PROMPT
+
 
 app = FastAPI(title="Assignment 03 - RAG")
 
@@ -82,26 +84,34 @@ def get_embedding(text: str):
 def get_embeddings_batch(texts: list[str]):
     """Return list of embedding vectors for a list of texts using Voyage AI.
 
-    This attempts to send the full list in one request; if the API doesn't
-    support batching, it will fall back to per-item requests.
+    This splits the texts into smaller batches (e.g., size 32) to prevent
+    rate-limit errors or timeouts, then returns the combined list of embeddings.
     """
     if not texts:
         return []
 
-    payload = {"model": "voyage-2", "input": texts}
-    data = _voyage_api_request(payload)
-    # expected: {data: [{embedding: [...]}, ...]}
-    if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-        embeddings = []
-        for item in data["data"]:
-            if isinstance(item, dict) and "embedding" in item:
-                embeddings.append(item["embedding"])
-            else:
-                raise RuntimeError("Unexpected batch item shape from Voyage API")
-        return embeddings
+    batch_size = 32
+    all_embeddings = []
+    total_batches = -(-len(texts) // batch_size)
 
-    # If API returned unexpected shape, raise so caller sees error
-    raise RuntimeError("Unexpected response from Voyage API for batch embeddings.")
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        print(f"Requesting embeddings for batch {i // batch_size + 1}/{total_batches}...")
+        payload = {"model": "voyage-2", "input": batch}
+        data = _voyage_api_request(payload)
+        
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            for item in data["data"]:
+                if isinstance(item, dict) and "embedding" in item:
+                    all_embeddings.append(item["embedding"])
+                else:
+                    raise RuntimeError("Unexpected batch item shape from Voyage API")
+        elif isinstance(data, dict) and "embedding" in data:
+            all_embeddings.append(data["embedding"])
+        else:
+            raise RuntimeError("Unexpected response from Voyage API for batch embeddings.")
+
+    return all_embeddings
 
 if not os.environ.get("GITHUB_TOKEN"):
     print("Warning: GITHUB_TOKEN is missing.")
@@ -110,13 +120,13 @@ llm = None
 def _get_llm():
     global llm
     if llm is None:
-        api_key = os.environ.get("GITHUB_TOKEN")
+        api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
-            raise RuntimeError("GITHUB_TOKEN is missing.")
+            raise RuntimeError("GROQ_API_KEY is not set in the environment or .env file.")
         llm = ChatOpenAI(
-            model="gpt-4o-mini",
+            model="llama-3.3-70b-versatile",
             api_key=api_key,
-            base_url="https://models.inference.ai.azure.com",
+            base_url="https://api.groq.com/openai/v1",
             temperature=0.1,
         )
     return llm
@@ -131,9 +141,23 @@ def _get_qdrant_client():
     if qdrant_client is None:
         QDRANT_URL = os.environ.get("QDRANT_URL")
         QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
-        if not QDRANT_URL or not QDRANT_API_KEY:
-            raise RuntimeError("QDRANT_URL and QDRANT_API_KEY are required.")
-        qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+        
+        if not QDRANT_URL or not QDRANT_API_KEY or QDRANT_URL.lower() == "local":
+            print("Using local persistent Qdrant storage at ./qdrant_db")
+            qdrant_client = QdrantClient(path="./qdrant_db")
+            return qdrant_client
+            
+        try:
+            print(f"Attempting to connect to Qdrant Cloud: {QDRANT_URL}")
+            clean_url = QDRANT_URL.replace(":6333", "").replace(":6334", "")
+            client = QdrantClient(url=clean_url, port=6334, api_key=QDRANT_API_KEY, check_compatibility=False)
+            # Quick check to verify connection
+            client.collection_exists(collection_name=QDRANT_COLLECTION)
+            qdrant_client = client
+            print("Successfully connected to Qdrant Cloud!")
+        except Exception as e:
+            print(f"Warning: Qdrant Cloud connection failed ({e}). Falling back to local persistent Qdrant storage at ./qdrant_db")
+            qdrant_client = QdrantClient(path="./qdrant_db")
     return qdrant_client
 
 class QueryRequest(BaseModel):
@@ -191,11 +215,6 @@ def _index_documents(docs, source_name: str, upload_type: str):
 
     client = _get_qdrant_client()
 
-    try:
-        client.delete_collection(collection_name=QDRANT_COLLECTION)
-    except Exception:
-        pass
-
     chunk_texts = [doc.page_content for doc in chunks]
     print("Requesting embeddings from Voyage AI...")
     chunk_vectors = get_embeddings_batch(chunk_texts)
@@ -203,13 +222,32 @@ def _index_documents(docs, source_name: str, upload_type: str):
 
     # ensure collection exists with correct vector size
     vector_size = len(chunk_vectors[0]) if chunk_vectors else 0
-    client.create_collection(
-        collection_name=QDRANT_COLLECTION,
-        vectors_config=VectorParams(
-            size=vector_size,
-            distance=Distance.COSINE,
-        ),
-    )
+    if not client.collection_exists(collection_name=QDRANT_COLLECTION):
+        client.create_collection(
+            collection_name=QDRANT_COLLECTION,
+            vectors_config=VectorParams(
+                size=vector_size,
+                distance=Distance.COSINE,
+            ),
+        )
+
+    # To avoid duplicate chunks if the same filename is uploaded again,
+    # delete any existing points with this source_name.
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    try:
+        client.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="source_name",
+                        match=MatchValue(value=source_name)
+                    )
+                ]
+            )
+        )
+    except Exception as e:
+        print(f"Notice: Failed to clear old vectors for '{source_name}': {e}")
 
     points = []
     for index, (chunk, vector) in enumerate(zip(chunks, chunk_vectors)):
@@ -231,7 +269,11 @@ def _index_documents(docs, source_name: str, upload_type: str):
             )
         )
 
-    client.upsert(collection_name=QDRANT_COLLECTION, points=points, wait=True)
+    # Upsert points in batches to prevent payload errors on large docs
+    batch_size = 100
+    for i in range(0, len(points), batch_size):
+        client.upsert(collection_name=QDRANT_COLLECTION, points=points[i:i+batch_size], wait=True)
+        
     return len(chunks)
 
 def _search_qdrant(query_vector, top_k: int):
@@ -243,6 +285,38 @@ def _search_qdrant(query_vector, top_k: int):
         with_payload=True,
     )
     return getattr(response, "points", response)
+
+class DeleteSourceRequest(BaseModel):
+    source_name: str
+
+@app.post("/delete-source")
+async def delete_source(req: DeleteSourceRequest):
+    client = _get_qdrant_client()
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    try:
+        client.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="source_name",
+                        match=MatchValue(value=req.source_name)
+                    )
+                ]
+            )
+        )
+        return {"message": f"Source '{req.source_name}' deleted successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete source: {e}")
+
+@app.post("/clear")
+async def clear_data():
+    client = _get_qdrant_client()
+    try:
+        client.delete_collection(collection_name=QDRANT_COLLECTION)
+        return {"message": "All data cleared successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear data: {e}")
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -258,17 +332,17 @@ async def upload_file(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, tf)
 
         if normalized_suffix == ".csv":
-            docs = _load_csv_documents(tmp_file, source_name=os.path.basename(file.filename) or "uploaded.csv")
+            docs = await run_in_threadpool(_load_csv_documents, tmp_file, source_name=os.path.basename(file.filename) or "uploaded.csv")
             upload_type = "csv"
         else:
             loader = PyPDFLoader(tmp_file)
-            docs = loader.load()
+            docs = await run_in_threadpool(loader.load)
             upload_type = "pdf"
 
-        total_chunks = _index_documents(docs, source_name=os.path.basename(file.filename) or "uploaded.file", upload_type=upload_type)
+        total_chunks = await run_in_threadpool(_index_documents, docs, source_name=os.path.basename(file.filename) or "uploaded.file", upload_type=upload_type)
 
         return {
-            "message": "File ingested and collection reset.",
+            "message": "File ingested successfully.",
             "total_chunks": total_chunks,
         }
     except Exception as e:
@@ -287,9 +361,9 @@ async def upload_text(payload: TextUploadRequest):
         return {"message": "No text provided.", "total_chunks": 0}
 
     docs = [Document(page_content=text, metadata={"source": "clipboard-text"})]
-    total_chunks = _index_documents(docs, source_name="clipboard-text", upload_type="text")
+    total_chunks = await run_in_threadpool(_index_documents, docs, source_name="clipboard-text", upload_type="text")
     return {
-        "message": "Text ingested and collection reset.",
+        "message": "Text ingested successfully.",
         "total_chunks": total_chunks,
     }
 

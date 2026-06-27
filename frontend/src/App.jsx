@@ -19,7 +19,7 @@ function App() {
     {
       id: 'seed-assistant',
       role: 'assistant',
-      text: 'Add a source (clipboard text or a file), then ask your question.'
+      text: 'Add one or more sources (clipboard text or files), then ask your question. EasyLM will retrieve context across all active sources collectively.'
     }
   ])
   const [input, setInput] = useState('')
@@ -32,7 +32,7 @@ function App() {
   const [confirmDelete, setConfirmDelete] = useState({ open: false, id: null, name: '' })
 
   const siteName = 'EasyLM'
-  const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
+  const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:10000').replace(/\/$/, '')
   const hasSource = sources.length > 0
   const onHomePage = location.pathname === '/home'
 
@@ -228,14 +228,14 @@ function App() {
       return
     }
 
-    if (sources.length >= 3) {
+    if (sources.length >= 5) {
       setMessages((prev) => [
         ...prev,
         {
           id: `source-limit-${Date.now()}`,
           role: 'assistant',
           variant: 'warning',
-          text: 'You can keep up to 3 sources at the same time. Remove one to add another.'
+          text: 'You can keep up to 5 sources at the same time. Remove one to add another.'
         }
       ])
       return
@@ -360,26 +360,91 @@ function App() {
     }
   }
 
-  const removeSource = (id) => {
-    setSources((prev) => {
-      const found = prev.find((s) => s.id === id)
-      if (found && found.previewUrl) URL.revokeObjectURL(found.previewUrl)
-      return prev.filter((s) => s.id !== id)
-    })
+  const removeSource = async (id) => {
+    const found = sources.find((s) => s.id === id)
+    if (!found) return
+
+    setIsBusy(true)
+    try {
+      const sourceName = found.type === 'text' ? 'clipboard-text' : found.name
+      const resp = await fetch(`${apiBaseUrl}/delete-source`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_name: sourceName })
+      })
+      if (!resp.ok) throw new Error('Failed to delete source from database')
+
+      if (found.previewUrl) URL.revokeObjectURL(found.previewUrl)
+      setSources((prev) => prev.filter((s) => s.id !== id))
+      
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `source-removed-${Date.now()}`,
+          role: 'assistant',
+          variant: 'info',
+          text: `Source "${found.name}" removed successfully.`
+        }
+      ])
+    } catch (err) {
+      console.error(err)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `source-remove-error-${Date.now()}`,
+          role: 'assistant',
+          variant: 'error',
+          text: `Failed to remove source: ${err.message}`
+        }
+      ])
+    } finally {
+      setIsBusy(false)
+    }
   }
 
   const closeModal = () => {
     setIsModalOpen(false)
   }
 
-  const clearSources = () => {
-    sources.forEach((source) => {
-      if (source.previewUrl) {
-        URL.revokeObjectURL(source.previewUrl)
-      }
-    })
-    setSources([])
-    setPdfFile(null)
+  const clearSources = async () => {
+    setIsBusy(true)
+    try {
+      const resp = await fetch(`${apiBaseUrl}/clear`, {
+        method: 'POST'
+      })
+      if (!resp.ok) throw new Error('Failed to clear database')
+
+      sources.forEach((source) => {
+        if (source.previewUrl) {
+          URL.revokeObjectURL(source.previewUrl)
+        }
+      })
+      setSources([])
+      setPdfFile(null)
+      
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sources-cleared-${Date.now()}`,
+          role: 'assistant',
+          variant: 'info',
+          text: 'All sources cleared successfully.'
+        }
+      ])
+    } catch (err) {
+      console.error(err)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sources-clear-error-${Date.now()}`,
+          role: 'assistant',
+          variant: 'error',
+          text: `Failed to clear sources: ${err.message}`
+        }
+      ])
+    } finally {
+      setIsBusy(false)
+    }
   }
 
   const sendMessage = async () => {

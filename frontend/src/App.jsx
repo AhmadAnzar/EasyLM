@@ -1126,7 +1126,10 @@ function App() {
               <span>It is still indexed and searchable. Upload it again if you want to view it here.</span>
             </div>
           ) : (
-            <pre className="preview-text">{previewModal.text || 'No preview available.'}</pre>
+            <pre className="preview-text">
+              {previewModal.text ||
+                "The original content isn't stored in this browser, but this source is still indexed and searchable."}
+            </pre>
           )}
         </div>
       </Modal>

@@ -58,7 +58,7 @@ Start the backend from the backend folder:
 uvicorn main:app --port 8000
 ```
 
-The backend runs on port 8000. (`python main.py` uses port 10000 instead, or the PORT variable if set.)
+The backend runs on port 8000. (`python main.py` also defaults to 8000, and honours the PORT variable if set.)
 
 Large files take a while to embed. The app shows live progress while indexing and has a Cancel button.
 
@@ -72,15 +72,23 @@ npm install
 npm run dev
 ```
 
-The frontend runs on port 5173 and calls the backend at `http://localhost:8000`. To use a different backend, set `VITE_API_BASE_URL` in `frontend/.env`.
+The frontend runs on port 5173 (Vite uses the next free port if that one is taken) and calls the backend at `http://localhost:8000`. To use a different backend, set `VITE_API_BASE_URL` in `frontend/.env`.
 
 ## How to use the app
 
 1. Open the frontend in your browser.
-2. Upload a file or paste text.
-3. Wait for the content to be processed and indexed.
-4. Ask a question about the uploaded content.
+2. Add a source: drop a PDF or CSV anywhere on the page, use Add Sources, or paste text (up to 5 sources at once).
+3. Wait for the content to be processed and indexed. The dialog shows the real progress and you can cancel.
+4. Ask a question about the uploaded content. Follow-up questions work because the recent conversation is sent along.
 5. Read the answer and check the source citations.
+
+## Backend API
+
+- `POST /upload` and `POST /upload-text` index a file or some text (an optional `job_id` lets the client follow progress)
+- `GET /progress/{job_id}` and `POST /cancel/{job_id}` report on and stop an upload in progress
+- `POST /query` answers a question (optionally with the recent chat `history`)
+- `GET /sources` lists what is indexed, with the chunk count per source
+- `POST /delete-source` removes one source and `POST /clear` removes everything
 
 ## Supported input
 
@@ -95,6 +103,7 @@ The app currently supports:
 - The app uses Qdrant for vector storage and retrieval.
 - The backend uses retrieved chunks when generating answers.
 - The app is designed to answer from the uploaded content, not from general model memory alone.
+- The chat and the source list are saved in the browser, and uploaded PDFs are kept there too (IndexedDB) so their preview survives a refresh. On load the source list is synced with what is actually indexed, so nothing indexed is ever missing from the list.
 - If a required environment variable is missing, the backend may not be able to complete uploads or query requests.
 
 ## Assignment fit

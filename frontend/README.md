@@ -1,16 +1,29 @@
-# React + Vite
+# EasyLM frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite interface for EasyLM. It talks to the FastAPI backend in `../backend` (see the main README
+for the full setup).
 
-Currently, two official plugins are available:
+## Run it
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```
+npm install
+npm run dev
+```
 
-## React Compiler
+The dev server starts on port 5173 (Vite picks the next free port if that one is taken) and calls the
+backend at `http://localhost:8000`. To use another backend, copy `.env.example` to `.env` and set
+`VITE_API_BASE_URL`.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Other scripts
 
-## Expanding the ESLint configuration
+- `npm run build` creates a production build in `dist/`
+- `npm run preview` serves that build locally
+- `npm run lint` runs ESLint
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## What lives where
+
+- `src/App.jsx` holds the app state: sources, chat, uploads, drag and drop
+- `src/components/` has the landing page, the workspace, the Add Sources dialog and the animated `Modal`
+- `src/fileStore.js` keeps uploaded PDFs in the browser (IndexedDB) so previews survive a refresh
+- The chat and the source list are saved in `localStorage`, and on load the source list is synced with
+  what is actually indexed in the database

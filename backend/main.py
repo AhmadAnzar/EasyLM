@@ -8,9 +8,11 @@ import tempfile
 import threading
 import time
 from uuid import uuid4
-from fastapi import Depends, FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pathlib import Path
 from pydantic import BaseModel
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -20,8 +22,27 @@ import requests
 from langchain_openai import ChatOpenAI
 from openai import BadRequestError
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PayloadSchemaType,
+    PointStruct,
+    VectorParams,
+)
+from accounts import (
+    DUMMY_HASH,
+    USERNAME_RE,
+    TokenSigner,
+    UserStore,
+    hash_password,
+    normalize_username,
+    validate_credentials,
+    verify_password,
+)
 from prompts import CONDENSE_QUESTION_PROMPT, RAG_SYSTEM_PROMPT
+from ratelimit import RateLimiter
 
 # pypdf logs a warning per damaged object in some PDFs; thousands of lines slow the server down.
 logging.getLogger("pypdf").setLevel(logging.ERROR)
@@ -42,26 +63,40 @@ def _load_env_file(path: str = ".env"):
 
 _load_env_file()
 
-# ---- access control -----------------------------------------------------------------------------
-# Set APP_ACCESS_KEY to require an access code on every data endpoint; the frontend asks visitors for it.
-# (A key baked into the frontend build would be visible to anyone, so the code is typed in instead.)
-ACCESS_KEY = os.environ.get("APP_ACCESS_KEY", "").strip()
-
+# ---- accounts, sessions, workspaces and rate limits ----------------------------------------------
 # Browser origins allowed to call the API, e.g. CORS_ORIGINS="https://my-app.vercel.app,http://localhost:5173".
 # Unset means any origin (fine for local development).
 _cors_origins = [o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins or ["*"],
-    allow_credentials=False,  # the access code travels in a header, never a cookie
+    allow_credentials=False,  # sessions travel in the Authorization header, never a cookie
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"],
 )
 
-_AUTH_MAX_FAILURES = 10
-_AUTH_WINDOW_SECONDS = 600
-_auth_failures: dict[str, list[float]] = {}
-_auth_lock = threading.Lock()
+# Sessions are signed with SESSION_SECRET. Without it a random secret is used for this run, which means
+# everyone is logged out whenever the server restarts.
+_session_secret = os.environ.get("SESSION_SECRET", "").strip()
+SESSION_SECRET_SET = bool(_session_secret)
+if not _session_secret:
+    _session_secret = secrets.token_urlsafe(32)
+token_signer = TokenSigner(_session_secret.encode("utf-8"))
+
+USERS_COLLECTION = os.environ.get("USERS_COLLECTION", "easylm_users").strip() or "easylm_users"
+user_store = UserStore(lambda: _get_qdrant_client(), USERS_COLLECTION)
+MAX_WORKSPACES_PER_USER = int(os.environ.get("MAX_WORKSPACES_PER_USER", "5"))
+MAX_UPLOAD_MB = float(os.environ.get("MAX_UPLOAD_MB", "25"))
+MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "200000"))
+
+# Documents belong to a workspace. "demo" is the read-only workspace everyone (guests included) can ask
+# questions about; a user's own workspaces are called "<username>:<number>" and only that user can touch them.
+DEMO_WORKSPACE = "demo"
+WORKSPACE_RE = re.compile(r"^([a-z0-9][a-z0-9_-]{2,23}):(\d{1,3})$")
+
+limiter = RateLimiter()
+_register_lock = threading.Lock()
 
 
 def _client_ip(request: Request) -> str:
@@ -71,38 +106,127 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def require_access(request: Request):
-    """Dependency for every data endpoint: checks the X-Access-Key header when access control is on."""
-    if not ACCESS_KEY:
-        return
-    supplied = request.headers.get("x-access-key", "")
-    ip = _client_ip(request)
-    now = time.time()
-    with _auth_lock:
-        recent = [t for t in _auth_failures.get(ip, []) if now - t < _AUTH_WINDOW_SECONDS]
-        if recent:
-            _auth_failures[ip] = recent
-        else:
-            _auth_failures.pop(ip, None)
-        if len(recent) >= _AUTH_MAX_FAILURES:
-            raise HTTPException(status_code=429, detail="Too many wrong access codes. Try again in a few minutes.")
-    if not supplied:
-        raise HTTPException(status_code=401, detail="Access code required.")
-    if not secrets.compare_digest(supplied.encode("utf-8"), ACCESS_KEY.encode("utf-8")):
-        with _auth_lock:
-            _auth_failures.setdefault(ip, []).append(now)
-        raise HTTPException(status_code=401, detail="Wrong access code.")
+def _bearer_user(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return token_signer.verify(header[7:].strip())
+    return None
 
 
-@app.get("/auth/status")
-async def auth_status():
-    """Public: tells the frontend whether it must ask for an access code."""
-    return {"required": bool(ACCESS_KEY)}
+def require_user(request: Request) -> str:
+    """The logged-in username, or HTTP 401."""
+    username = _bearer_user(request)
+    if not username or not user_store.get(username):
+        raise HTTPException(status_code=401, detail="Please log in.")
+    return username
 
 
-@app.get("/auth/check", dependencies=[Depends(require_access)])
-async def auth_check():
-    return {"ok": True}
+def authorize_workspace(request: Request, workspace: str | None, write: bool) -> str:
+    """Check that this request may use `workspace` (read, or read and write) and return its normalised id.
+
+    - demo: anyone may read; nobody may write (it is a fixed demo dataset)
+    - "<username>:<n>": only that logged-in user, for reading and writing
+    """
+    workspace = (workspace or DEMO_WORKSPACE).strip().lower()
+    if workspace == DEMO_WORKSPACE:
+        if write:
+            raise HTTPException(status_code=403, detail="The demo is read-only. Log in to use your own workspace.")
+        return DEMO_WORKSPACE
+    match = WORKSPACE_RE.match(workspace)
+    if not match:
+        raise HTTPException(status_code=404, detail="Unknown workspace.")
+    username = require_user(request)
+    if username != match.group(1):
+        raise HTTPException(status_code=403, detail="That workspace belongs to another account.")
+    owned = {w.get("n") for w in (user_store.get(username) or {}).get("workspaces", [])}
+    if int(match.group(2)) not in owned:
+        raise HTTPException(status_code=404, detail="Unknown workspace.")
+    return workspace
+
+
+def _actor(request: Request) -> tuple[str, bool]:
+    """Who to count rate limits against: the logged-in user, otherwise the caller's IP address."""
+    username = _bearer_user(request)
+    if username:
+        return f"user:{username}", True
+    return f"ip:{_client_ip(request)}", False
+
+
+class Credentials(BaseModel):
+    username: str
+    password: str
+
+
+def _session_payload(username: str, record: dict) -> dict:
+    return {
+        "token": token_signer.sign(username),
+        "user": {"username": username, "workspaces": record.get("workspaces", [])},
+    }
+
+
+@app.post("/auth/register")
+async def register(creds: Credentials, request: Request):
+    limiter.check(f"register:{_client_ip(request)}", 5, 3600, "sign-ups")
+    username = normalize_username(creds.username)
+    problem = validate_credentials(username, creds.password)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    def create():
+        with _register_lock:
+            if user_store.get(username):
+                raise HTTPException(status_code=409, detail="That username is already taken.")
+            return user_store.create(username, hash_password(creds.password))
+
+    record = await run_in_threadpool(create)
+    return _session_payload(username, record)
+
+
+@app.post("/auth/login")
+async def login(creds: Credentials, request: Request):
+    limiter.check(f"login:{_client_ip(request)}", 10, 600, "login attempts")
+    username = normalize_username(creds.username)
+
+    def check():
+        record = user_store.get(username) if USERNAME_RE.match(username) else None
+        matches = verify_password(creds.password, record["password_hash"] if record else DUMMY_HASH)
+        return record if (record and matches) else None
+
+    record = await run_in_threadpool(check)
+    if not record:
+        raise HTTPException(status_code=401, detail="Wrong username or password.")
+    return _session_payload(username, record)
+
+
+@app.get("/auth/me")
+async def auth_me(request: Request):
+    username = await run_in_threadpool(require_user, request)
+    record = await run_in_threadpool(user_store.get, username)
+    return {"username": username, "workspaces": record.get("workspaces", [])}
+
+
+@app.get("/workspaces")
+async def list_workspaces(request: Request):
+    username = await run_in_threadpool(require_user, request)
+    record = await run_in_threadpool(user_store.get, username)
+    return {"workspaces": record.get("workspaces", [])}
+
+
+@app.post("/workspaces")
+async def create_workspace(request: Request):
+    username = await run_in_threadpool(require_user, request)
+    limiter.check(f"new-workspace:{username}", 20, 3600, "new workspaces")
+
+    def add():
+        existing = (user_store.get(username) or {}).get("workspaces", [])
+        if len(existing) >= MAX_WORKSPACES_PER_USER:
+            raise HTTPException(status_code=400, detail=f"You can have up to {MAX_WORKSPACES_PER_USER} workspaces.")
+        number = max([w["n"] for w in existing], default=0) + 1
+        updated = existing + [{"n": number, "name": f"Workspace {number}"}]
+        user_store.set_workspaces(username, updated)
+        return updated
+
+    return {"workspaces": await run_in_threadpool(add)}
 
 
 class RateLimitExceeded(Exception):
@@ -260,10 +384,8 @@ def _lower_process_priority():
 @app.on_event("startup")
 def _startup_checks():
     _lower_process_priority()
-    if ACCESS_KEY:
-        print("Access control: ON (APP_ACCESS_KEY is set)")
-    else:
-        print("Warning: access control is OFF. Set APP_ACCESS_KEY so only people with the code can use this server.")
+    if not SESSION_SECRET_SET:
+        print("Warning: SESSION_SECRET is not set, so logins are forgotten whenever the server restarts.")
     print("CORS origins: " + (", ".join(_cors_origins) if _cors_origins else "any (set CORS_ORIGINS to restrict)"))
     print(f"Embedding provider: {EMBEDDING_PROVIDER}")
     if EMBEDDING_PROVIDER == "voyage":
@@ -288,6 +410,9 @@ def _startup_checks():
         _get_llm()
     except Exception as e:
         print(f"Warning: could not warm up the Groq client ({e}).")
+
+    # Index the bundled demo documents in the background so guests have something to try straight away.
+    threading.Thread(target=_index_demo_documents, name="demo-indexer", daemon=True).start()
 
 
 def get_embedding(text: str):
@@ -425,11 +550,13 @@ class ChatTurn(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     history: list[ChatTurn] = []
+    workspace: str = DEMO_WORKSPACE
 
 class TextUploadRequest(BaseModel):
     text: str
     job_id: str | None = None
     source_name: str | None = None
+    workspace: str = DEMO_WORKSPACE
 
 def _load_pdf_documents(file_path: str, source_name: str, job_id=None):
     """Read a PDF page by page so the UI can show progress and the user can cancel."""
@@ -487,21 +614,38 @@ def _load_csv_documents(file_path: str, source_name: str):
                     )
     return documents
 
-def _ensure_source_index(client):
-    """Qdrant Cloud refuses filtered deletes on `source_name` without a payload index.
+_indexes_ready = False
 
-    Creating an index that already exists is harmless, so this is safe to call every time.
+
+def _ensure_indexes(client):
+    """Qdrant Cloud refuses filtered reads and deletes on payload fields that have no index.
+
+    Creating an index that already exists is harmless; after one success it is skipped for this process.
     """
-    try:
-        client.create_payload_index(
-            collection_name=QDRANT_COLLECTION,
-            field_name="source_name",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
-    except Exception as e:
-        print(f"Notice: Could not create payload index on 'source_name': {e}")
+    global _indexes_ready
+    if _indexes_ready:
+        return
+    ok = True
+    for field in ("source_name", "workspace"):
+        try:
+            client.create_payload_index(
+                collection_name=QDRANT_COLLECTION,
+                field_name=field,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception as e:
+            ok = False
+            print(f"Notice: Could not create payload index on '{field}': {e}")
+    _indexes_ready = ok
 
-def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
+
+def _workspace_filter(workspace: str, source_name: str | None = None) -> Filter:
+    conditions = [FieldCondition(key="workspace", match=MatchValue(value=workspace))]
+    if source_name is not None:
+        conditions.append(FieldCondition(key="source_name", match=MatchValue(value=source_name)))
+    return Filter(must=conditions)
+
+def _index_documents(docs, source_name: str, upload_type: str, job_id=None, workspace: str = DEMO_WORKSPACE):
     _set_progress(job_id, stage="chunking")
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000, chunk_overlap=200)
@@ -530,22 +674,14 @@ def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
             ),
         )
 
-    _ensure_source_index(client)
+    _ensure_indexes(client)
 
-    # To avoid duplicate chunks if the same filename is uploaded again,
+    # To avoid duplicate chunks if the same filename is uploaded again to this workspace,
     # delete any existing points with this source_name.
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
     try:
         client.delete(
             collection_name=QDRANT_COLLECTION,
-            points_selector=Filter(
-                must=[
-                    FieldCondition(
-                        key="source_name",
-                        match=MatchValue(value=source_name)
-                    )
-                ]
-            )
+            points_selector=_workspace_filter(workspace, source_name),
         )
     except Exception as e:
         print(f"Notice: Failed to clear old vectors for '{source_name}': {e}")
@@ -555,6 +691,7 @@ def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
         payload = {
             "text": chunk.page_content,
             "source_name": source_name,
+            "workspace": workspace,
             "upload_type": upload_type,
             "chunk_index": index,
         }
@@ -577,27 +714,36 @@ def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
         
     return len(chunks)
 
-def _search_qdrant(query_vector, top_k: int):
+def _search_qdrant(query_vector, top_k: int, workspace: str):
     client = _get_qdrant_client()
     if not client.collection_exists(collection_name=QDRANT_COLLECTION):
-        return None  # nothing has been indexed yet (or everything was cleared)
+        return None  # nothing has been indexed yet
+    _ensure_indexes(client)
+    scope = _workspace_filter(workspace)
     response = client.query_points(
         collection_name=QDRANT_COLLECTION,
         query=query_vector,
+        query_filter=scope,
         limit=top_k,
         with_payload=True,
     )
-    return getattr(response, "points", response)
+    points = getattr(response, "points", response)
+    if not points and client.count(collection_name=QDRANT_COLLECTION, count_filter=scope, exact=True).count == 0:
+        return None  # this workspace has no documents yet
+    return points
 
-def _collect_sources(client):
-    """Every source in the collection with its chunk count (the database is the source of truth)."""
+def _collect_sources(client, workspace: str):
+    """Every source in a workspace with its chunk count (the database is the source of truth)."""
     if not client.collection_exists(collection_name=QDRANT_COLLECTION):
         return []
+    _ensure_indexes(client)
+    scope = _workspace_filter(workspace)
     found: dict[str, dict] = {}
     offset = None
     for _ in range(500):  # safety cap, ~500k chunks
         points, offset = client.scroll(
             collection_name=QDRANT_COLLECTION,
+            scroll_filter=scope,
             limit=1000,
             offset=offset,
             with_payload=["source_name", "upload_type"],
@@ -614,45 +760,97 @@ def _collect_sources(client):
             break
     return sorted(found.values(), key=lambda s: s["name"].lower())
 
-@app.get("/sources", dependencies=[Depends(require_access)])
-async def list_sources():
+
+# ---- the demo workspace -------------------------------------------------------------------------
+# PDFs in backend/demo/ are indexed into the read-only "demo" workspace when the server starts, so a
+# visitor who has not logged in can start asking questions immediately.
+DEMO_DIR = Path(__file__).resolve().parent / "demo"
+_demo_state = {"loading": any(DEMO_DIR.glob("*.pdf")), "error": ""}
+
+
+def _index_demo_documents():
+    _demo_state.update(loading=True, error="")
+    try:
+        client = _get_qdrant_client()
+        already = {s["name"] for s in _collect_sources(client, DEMO_WORKSPACE)}
+        for path in sorted(DEMO_DIR.glob("*.pdf")):
+            if path.name in already:
+                continue
+            print(f"Indexing demo document: {path.name}")
+            docs = _load_pdf_documents(str(path), path.name)
+            _index_documents(docs, path.name, "pdf", workspace=DEMO_WORKSPACE)
+        print("Demo workspace ready.")
+    except Exception as e:
+        _demo_state["error"] = str(e)
+        print(f"Warning: could not index the demo documents ({e}).")
+    finally:
+        _demo_state["loading"] = False
+
+
+async def _authorize(request: Request, workspace: str | None, write: bool) -> str:
+    return await run_in_threadpool(authorize_workspace, request, workspace, write)
+
+
+def _check_read_rate(request: Request):
+    limiter.check(f"read:{_client_ip(request)}", 240, 60, "requests")
+
+
+@app.get("/sources")
+async def list_sources(request: Request, workspace: str = DEMO_WORKSPACE):
+    _check_read_rate(request)
+    workspace = await _authorize(request, workspace, write=False)
     client = _get_qdrant_client()
     try:
-        sources = await run_in_threadpool(_collect_sources, client)
+        sources = await run_in_threadpool(_collect_sources, client, workspace)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list sources: {e}")
-    return {"sources": sources}
+    reply = {"sources": sources, "workspace": workspace}
+    if workspace == DEMO_WORKSPACE:
+        reply["loading"] = _demo_state["loading"]
+    return reply
+
+
+@app.get("/demo/file/{name}")
+async def demo_file(name: str, request: Request):
+    """The bundled demo PDF, so guests can preview the sources of the demo workspace."""
+    _check_read_rate(request)
+    path = (DEMO_DIR / Path(name).name).resolve()
+    if path.parent != DEMO_DIR or path.suffix.lower() != ".pdf" or not path.is_file():
+        raise HTTPException(status_code=404, detail="No such demo file.")
+    # "inline" so the browser shows it in the preview frame instead of downloading it
+    return FileResponse(path, media_type="application/pdf", filename=path.name, content_disposition_type="inline")
 
 class DeleteSourceRequest(BaseModel):
     source_name: str
+    workspace: str = DEMO_WORKSPACE
 
-@app.post("/delete-source", dependencies=[Depends(require_access)])
-async def delete_source(req: DeleteSourceRequest):
+@app.post("/delete-source")
+async def delete_source(req: DeleteSourceRequest, request: Request):
+    workspace = await _authorize(request, req.workspace, write=True)
     client = _get_qdrant_client()
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-    if client.collection_exists(collection_name=QDRANT_COLLECTION):
-        _ensure_source_index(client)
     try:
-        client.delete(
-            collection_name=QDRANT_COLLECTION,
-            points_selector=Filter(
-                must=[
-                    FieldCondition(
-                        key="source_name",
-                        match=MatchValue(value=req.source_name)
-                    )
-                ]
+        if client.collection_exists(collection_name=QDRANT_COLLECTION):
+            _ensure_indexes(client)
+            client.delete(
+                collection_name=QDRANT_COLLECTION,
+                points_selector=_workspace_filter(workspace, req.source_name),
             )
-        )
         return {"message": f"Source '{req.source_name}' deleted successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete source: {e}")
 
-@app.post("/clear", dependencies=[Depends(require_access)])
-async def clear_data():
+class ClearRequest(BaseModel):
+    workspace: str = DEMO_WORKSPACE
+
+@app.post("/clear")
+async def clear_data(req: ClearRequest, request: Request):
+    """Remove every document from one of the caller's own workspaces (never anyone else's)."""
+    workspace = await _authorize(request, req.workspace, write=True)
     client = _get_qdrant_client()
     try:
-        client.delete_collection(collection_name=QDRANT_COLLECTION)
+        if client.collection_exists(collection_name=QDRANT_COLLECTION):
+            _ensure_indexes(client)
+            client.delete(collection_name=QDRANT_COLLECTION, points_selector=_workspace_filter(workspace))
         return {"message": "All data cleared successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear data: {e}")
@@ -671,19 +869,28 @@ def _fail_job(job_id, exc: Exception) -> HTTPException:
     _set_progress(job_id, stage="error", note=str(exc))
     return HTTPException(status_code=500, detail=f"Upload processing failed: {exc}")
 
-@app.get("/progress/{job_id}", dependencies=[Depends(require_access)])
-async def get_progress(job_id: str):
+@app.get("/progress/{job_id}")
+async def get_progress(job_id: str, request: Request):
+    await run_in_threadpool(require_user, request)
     with _progress_lock:
         entry = _progress.get(job_id)
         return dict(entry) if entry else {"stage": "unknown", "done": 0, "total": 0, "note": ""}
 
-@app.post("/cancel/{job_id}", dependencies=[Depends(require_access)])
-async def cancel_job(job_id: str):
+@app.post("/cancel/{job_id}")
+async def cancel_job(job_id: str, request: Request):
+    await run_in_threadpool(require_user, request)
     _set_progress(job_id, cancelled=True)
     return {"message": "Cancel requested."}
 
-@app.post("/upload", dependencies=[Depends(require_access)])
-async def upload_file(file: UploadFile = File(...), job_id: str | None = Form(None)):
+@app.post("/upload")
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+    job_id: str | None = Form(None),
+    workspace: str = Form(DEMO_WORKSPACE),
+):
+    workspace = await _authorize(request, workspace, write=True)
+    limiter.check(f"upload:{_actor(request)[0]}", 10, 3600, "uploads")
     tmp_file = None
     try:
         suffix = os.path.splitext(file.filename)[1] if file.filename else ".pdf"
@@ -692,9 +899,15 @@ async def upload_file(file: UploadFile = File(...), job_id: str | None = Form(No
             raise HTTPException(status_code=400, detail="Only PDF and CSV files are supported.")
 
         _set_progress(job_id, stage="parsing")
+        max_bytes = int(MAX_UPLOAD_MB * 1024 * 1024)
+        size = 0
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
             tmp_file = tf.name
-            shutil.copyfileobj(file.file, tf)
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"Files can be up to {MAX_UPLOAD_MB:g} MB.")
+                tf.write(chunk)
 
         if normalized_suffix == ".csv":
             docs = await run_in_threadpool(_load_csv_documents, tmp_file, source_name=os.path.basename(file.filename) or "uploaded.csv")
@@ -709,7 +922,7 @@ async def upload_file(file: UploadFile = File(...), job_id: str | None = Form(No
                 detail="No readable text was found in this file. If it is a scanned PDF (images of pages), it needs OCR first.",
             )
 
-        total_chunks = await run_in_threadpool(_index_documents, docs, source_name=os.path.basename(file.filename) or "uploaded.file", upload_type=upload_type, job_id=job_id)
+        total_chunks = await run_in_threadpool(_index_documents, docs, source_name=os.path.basename(file.filename) or "uploaded.file", upload_type=upload_type, job_id=job_id, workspace=workspace)
         _set_progress(job_id, stage="done", total_chunks=total_chunks)
 
         return {
@@ -725,17 +938,21 @@ async def upload_file(file: UploadFile = File(...), job_id: str | None = Form(No
         except Exception:
             pass
 
-@app.post("/upload-text", dependencies=[Depends(require_access)])
-async def upload_text(payload: TextUploadRequest):
+@app.post("/upload-text")
+async def upload_text(payload: TextUploadRequest, request: Request):
+    workspace = await _authorize(request, payload.workspace, write=True)
+    limiter.check(f"upload:{_actor(request)[0]}", 10, 3600, "uploads")
     text = payload.text.strip()
     if not text:
         return {"message": "No text provided.", "total_chunks": 0}
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail=f"Pasted text can be up to {MAX_TEXT_CHARS:,} characters.")
 
     job_id = payload.job_id
     source_name = (payload.source_name or "clipboard-text").strip()[:120] or "clipboard-text"
     docs = [Document(page_content=text, metadata={"source": source_name})]
     try:
-        total_chunks = await run_in_threadpool(_index_documents, docs, source_name=source_name, upload_type="text", job_id=job_id)
+        total_chunks = await run_in_threadpool(_index_documents, docs, source_name=source_name, upload_type="text", job_id=job_id, workspace=workspace)
     except Exception as e:
         raise _fail_job(job_id, e)
     _set_progress(job_id, stage="done", total_chunks=total_chunks)
@@ -771,8 +988,22 @@ def _condense_question(history, question: str) -> str:
     return rewritten if rewritten and len(rewritten) < 500 else question
 
 
-@app.post("/query", dependencies=[Depends(require_access)])
-async def query_document(req: QueryRequest):
+def _check_query_rate(request: Request):
+    """Questions cost embedding and LLM calls, so guests get a smaller allowance than logged-in users."""
+    actor, is_user = _actor(request)
+    per_minute, per_hour = (20, 200) if is_user else (10, 60)
+    limiter.check(f"query-minute:{actor}", per_minute, 60, "questions")
+    limiter.check(f"query-hour:{actor}", per_hour, 3600, "questions")
+    limiter.check(
+        "query-all", 40, 60,
+        message="The demo is very busy right now. Please try again in a minute.",
+    )
+
+
+@app.post("/query")
+async def query_document(req: QueryRequest, request: Request):
+    workspace = await _authorize(request, req.workspace, write=False)
+    _check_query_rate(request)
     # The embedding, Qdrant and Groq calls below are blocking, so they run in worker threads
     # to keep the server responsive (e.g. to upload progress polls) while a question is answered.
     history = _clean_history(req.history)
@@ -795,11 +1026,13 @@ async def query_document(req: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error embedding query: {e}")
     try:
-        search_result = await run_in_threadpool(_search_qdrant, query_vector, TOP_K)
+        search_result = await run_in_threadpool(_search_qdrant, query_vector, TOP_K, workspace)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error searching Qdrant: {e}")
 
     if search_result is None:
+        if workspace == DEMO_WORKSPACE and _demo_state["loading"]:
+            return {"answer": "The demo document is still being prepared. Give it a few seconds and ask again."}
         return {"answer": "No documents are indexed yet. Add a source first, then ask your question."}
 
     if not search_result:

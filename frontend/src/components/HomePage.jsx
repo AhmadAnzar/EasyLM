@@ -182,7 +182,22 @@ function HomePage({
   const atSourceLimit = !readOnly && sources.length >= maxSources
   const limitTip = `You can only add ${maxSources} sources`
   const messagesContainerRef = useRef(null)
+  const composerInputRef = useRef(null)
   const lastMessageCountRef = useRef(0)
+
+  // Put the cursor in the question box whenever it becomes usable: when the page opens, when another
+  // chat or workspace is shown, and after an answer or an upload finishes. A short delay lets a closing
+  // dialog finish first, and nothing is touched while a dialog is open or another field is being typed in.
+  // Phones are skipped, where focusing would keep the on-screen keyboard popping up.
+  useEffect(() => {
+    if (isBusy || loading || window.matchMedia?.('(pointer: coarse)').matches) return undefined
+    const timer = setTimeout(() => {
+      const active = document.activeElement
+      const typingElsewhere = active && active !== document.body && active !== composerInputRef.current && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)
+      if (!typingElsewhere && !document.querySelector('.modal-overlay')) composerInputRef.current?.focus()
+    }, 260)
+    return () => clearTimeout(timer)
+  }, [isBusy, loading, activeChatId])
 
   useEffect(() => {
     const container = messagesContainerRef.current
@@ -405,6 +420,7 @@ function HomePage({
 
           <div className="composer">
             <input
+              ref={composerInputRef}
               value={input}
               onChange={(event) => onInputChange(event.target.value)}
               placeholder={hasSource || readOnly ? 'Ask a question about your sources' : 'Add a source to get started'}

@@ -71,6 +71,7 @@ function HomePage({
   siteName,
   hasSource,
   sources,
+  maxSources = 5,
   messages,
   input,
   onInputChange,
@@ -118,7 +119,9 @@ function HomePage({
         <aside className={`source-summary ${isDragging ? 'drop-zone' : ''}`}>
           <div className="section-head">
             <h3>Sources</h3>
-            <span className="count-pill">{sources.length}/5</span>
+            <span className="count-pill">
+              {sources.length}/{maxSources}
+            </span>
           </div>
 
           {hasSource ? (
@@ -143,7 +146,7 @@ function HomePage({
             </button>
           )}
 
-          <div className="source-hint">You can keep up to 5 sources at the same time.</div>
+          <div className="source-hint">You can keep up to {maxSources} sources at the same time.</div>
         </aside>
 
         <div className={`chat-box ${isDragging ? 'drop-zone' : ''}`}>

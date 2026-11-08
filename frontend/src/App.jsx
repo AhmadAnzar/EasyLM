@@ -6,6 +6,7 @@ import AddSourcesModal from './components/AddSourcesModal'
 import HomePage from './components/HomePage'
 import LandingPage from './components/LandingPage'
 import Modal from './components/Modal'
+import { clearFiles, getFile, putFile, removeFile } from './fileStore'
 
 const STORAGE_KEY = 'easylm:v1'
 const MAX_SOURCES = 5
@@ -27,6 +28,9 @@ const isSupportedFile = (file) => {
   const name = (file?.name || '').toLowerCase()
   return SUPPORTED_EXTENSIONS.some((extension) => name.endsWith(extension))
 }
+
+// The name a source is stored under in the database (pasted texts get a unique one; older ones shared one).
+const sourceKey = (source) => source.sourceName || (source.type === 'text' ? 'clipboard-text' : source.name)
 
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`
@@ -136,6 +140,22 @@ function App() {
     document.title = onHomePage ? `${siteName} · Workspace` : `${siteName} · Ask your documents`
   }, [onHomePage])
 
+  // Bring back the original PDFs kept in this browser, so their preview works after a refresh.
+  useEffect(() => {
+    let stopped = false
+    initialState.sources
+      .filter((source) => source.type === 'pdf')
+      .forEach(async (source) => {
+        const file = await getFile(source.id)
+        if (!file || stopped) return
+        const previewUrl = URL.createObjectURL(file)
+        setSources((prev) => prev.map((s) => (s.id === source.id ? { ...s, previewUrl } : s)))
+      })
+    return () => {
+      stopped = true
+    }
+  }, [initialState])
+
   // Cross-fade between pages with the View Transitions API where the browser has it.
   const supportsViewTransitions = typeof document !== 'undefined' && 'startViewTransition' in document
   useEffect(() => {
@@ -154,11 +174,12 @@ function App() {
   }
 
   useEffect(() => {
+    const typingTimers = typingTimersRef.current // the same Map for the whole life of the component
     return () => {
       clearInterval(pollTimerRef.current)
       clearTimeout(toastTimerRef.current)
-      typingTimersRef.current.forEach((timerId) => clearInterval(timerId))
-      typingTimersRef.current.clear()
+      typingTimers.forEach((timerId) => clearInterval(timerId))
+      typingTimers.clear()
       sourcesRef.current.forEach((source) => {
         if (source.previewUrl) {
           URL.revokeObjectURL(source.previewUrl)
@@ -178,6 +199,68 @@ function App() {
     clearTimeout(toastTimerRef.current)
     setToast((prev) => ({ ...prev, open: false }))
   }
+
+  // The database is the source of truth: on load, make the list match what is really indexed. Sources
+  // that were indexed but are missing here (cleared browser data, another browser) come back, and ones
+  // that are gone from the database (cleared, different collection) are dropped from the list.
+  const syncSourcesWithServer = async () => {
+    try {
+      const resp = await fetch(`${apiBaseUrl}/sources`)
+      if (!resp.ok) return // e.g. the vector database is unreachable: keep what we have
+      const data = await resp.json()
+      const remote = Array.isArray(data.sources) ? data.sources : []
+      const remoteByName = new Map(remote.map((r) => [r.name, r]))
+
+      const next = []
+      const known = new Set()
+      let removed = 0
+      let changed = false
+      sourcesRef.current.forEach((source) => {
+        const match = remoteByName.get(sourceKey(source))
+        if (!match) {
+          removed += 1
+          removeFile(source.id)
+          if (source.previewUrl) URL.revokeObjectURL(source.previewUrl)
+          return
+        }
+        known.add(match.name)
+        if (match.chunks !== source.chunks) changed = true
+        next.push({ ...source, chunks: match.chunks })
+      })
+
+      let added = 0
+      let textCount = next.filter((s) => s.type === 'text').length
+      remote.forEach((r) => {
+        if (known.has(r.name) || next.length >= MAX_SOURCES) return
+        added += 1
+        if (r.type === 'text') textCount += 1
+        next.push({
+          id: `recovered-${r.name}`,
+          type: ['pdf', 'csv', 'text'].includes(r.type) ? r.type : 'text',
+          name: r.type === 'text' ? `Pasted text ${textCount}` : r.name,
+          sourceName: r.name,
+          preview: '',
+          chunks: r.chunks,
+          recovered: true
+        })
+      })
+
+      if (!added && !removed && !changed) return
+      setSources(next)
+      if (added || removed) {
+        const parts = [added && `${added} added`, removed && `${removed} removed`].filter(Boolean).join(', ')
+        showToast(`Your sources were synced with the database (${parts}).`, 'info')
+      }
+    } catch {
+      // backend not reachable yet: the list stays as saved in this browser
+    }
+  }
+
+  useEffect(() => {
+    syncSourcesWithServer()
+    // run once on load
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Used by the Add Sources dialog (file picker and its own drop zone) so every entry point
   // applies the same file-type rule.
@@ -540,10 +623,18 @@ function App() {
         // PDFs preview in the browser's own viewer; for CSVs show the first few KB as text.
         const previewUrl = fileType === 'pdf' ? URL.createObjectURL(file) : undefined
         const csvPreview = fileType === 'csv' ? await file.slice(0, 6000).text() : ''
+        const newId = `file-${Date.now()}`
+        // The database replaced any earlier source with the same name, so the list must do the same.
+        sourcesRef.current
+          .filter((s) => sourceKey(s) === file.name)
+          .forEach((old) => {
+            removeFile(old.id)
+            if (old.previewUrl) URL.revokeObjectURL(old.previewUrl)
+          })
         setSources((prev) => [
-          ...prev,
+          ...prev.filter((s) => sourceKey(s) !== file.name),
           {
-            id: `file-${Date.now()}`,
+            id: newId,
             type: fileType,
             name: file.name,
             sourceName: file.name,
@@ -553,6 +644,8 @@ function App() {
             chunks: data.total_chunks ?? 0
           }
         ])
+        // keep the original PDF in this browser so the preview survives a refresh
+        if (fileType === 'pdf') putFile(newId, file)
       }
 
       setMessages((prev) => [
@@ -609,17 +702,16 @@ function App() {
 
     setIsBusy(true)
     try {
-      // sources saved before pasted texts got their own name used one shared name
-      const sourceName = found.sourceName || (found.type === 'text' ? 'clipboard-text' : found.name)
       const resp = await fetch(`${apiBaseUrl}/delete-source`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_name: sourceName })
+        body: JSON.stringify({ source_name: sourceKey(found) })
       })
       if (!resp.ok) throw new Error('Failed to delete source from database')
 
       // fade the card out, then drop it from the list
       setSources((prev) => prev.map((s) => (s.id === id ? { ...s, removing: true } : s)))
+      removeFile(found.id)
       setTimeout(() => {
         if (found.previewUrl) URL.revokeObjectURL(found.previewUrl)
         setSources((prev) => prev.filter((s) => s.id !== id))
@@ -675,8 +767,9 @@ function App() {
         }
       })
       setSources([])
+      clearFiles()
       setPdfFile(null)
-      
+
       setMessages((prev) => [
         ...prev,
         {
@@ -795,6 +888,7 @@ function App() {
               siteName={siteName}
               hasSource={hasSource}
               sources={sources}
+              maxSources={MAX_SOURCES}
               messages={messages}
               input={input}
               onInputChange={setInput}
@@ -891,8 +985,8 @@ function App() {
             <iframe src={`${previewModal.url}#view=FitH`} title={previewModal.name} />
           ) : previewModal.kind === 'pdf' ? (
             <div className="preview-empty">
-              <strong>The PDF preview isn&apos;t available after a page refresh.</strong>
-              <span>The file is still indexed and searchable. Upload it again if you want to view it here.</span>
+              <strong>This PDF isn&apos;t stored in this browser, so it can&apos;t be previewed here.</strong>
+              <span>It is still indexed and searchable. Upload it again if you want to view it here.</span>
             </div>
           ) : (
             <pre className="preview-text">{previewModal.text || 'No preview available.'}</pre>

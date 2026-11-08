@@ -2,12 +2,13 @@ import os
 import re
 import csv
 import logging
+import secrets
 import shutil
 import tempfile
 import threading
 import time
 from uuid import uuid4
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import Depends, FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -27,14 +28,6 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 app = FastAPI(title="EasyLM API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 def _load_env_file(path: str = ".env"):
     try:
         with open(path, "r", encoding="utf-8") as env_file:
@@ -48,6 +41,69 @@ def _load_env_file(path: str = ".env"):
         pass
 
 _load_env_file()
+
+# ---- access control -----------------------------------------------------------------------------
+# Set APP_ACCESS_KEY to require an access code on every data endpoint; the frontend asks visitors for it.
+# (A key baked into the frontend build would be visible to anyone, so the code is typed in instead.)
+ACCESS_KEY = os.environ.get("APP_ACCESS_KEY", "").strip()
+
+# Browser origins allowed to call the API, e.g. CORS_ORIGINS="https://my-app.vercel.app,http://localhost:5173".
+# Unset means any origin (fine for local development).
+_cors_origins = [o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=False,  # the access code travels in a header, never a cookie
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_AUTH_MAX_FAILURES = 10
+_AUTH_WINDOW_SECONDS = 600
+_auth_failures: dict[str, list[float]] = {}
+_auth_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")  # set by the host's proxy (Render, Vercel...)
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def require_access(request: Request):
+    """Dependency for every data endpoint: checks the X-Access-Key header when access control is on."""
+    if not ACCESS_KEY:
+        return
+    supplied = request.headers.get("x-access-key", "")
+    ip = _client_ip(request)
+    now = time.time()
+    with _auth_lock:
+        recent = [t for t in _auth_failures.get(ip, []) if now - t < _AUTH_WINDOW_SECONDS]
+        if recent:
+            _auth_failures[ip] = recent
+        else:
+            _auth_failures.pop(ip, None)
+        if len(recent) >= _AUTH_MAX_FAILURES:
+            raise HTTPException(status_code=429, detail="Too many wrong access codes. Try again in a few minutes.")
+    if not supplied:
+        raise HTTPException(status_code=401, detail="Access code required.")
+    if not secrets.compare_digest(supplied.encode("utf-8"), ACCESS_KEY.encode("utf-8")):
+        with _auth_lock:
+            _auth_failures.setdefault(ip, []).append(now)
+        raise HTTPException(status_code=401, detail="Wrong access code.")
+
+
+@app.get("/auth/status")
+async def auth_status():
+    """Public: tells the frontend whether it must ask for an access code."""
+    return {"required": bool(ACCESS_KEY)}
+
+
+@app.get("/auth/check", dependencies=[Depends(require_access)])
+async def auth_check():
+    return {"ok": True}
+
 
 class RateLimitExceeded(Exception):
     """Embedding provider is rate limiting us and waiting it out is impractical."""
@@ -204,6 +260,11 @@ def _lower_process_priority():
 @app.on_event("startup")
 def _startup_checks():
     _lower_process_priority()
+    if ACCESS_KEY:
+        print("Access control: ON (APP_ACCESS_KEY is set)")
+    else:
+        print("Warning: access control is OFF. Set APP_ACCESS_KEY so only people with the code can use this server.")
+    print("CORS origins: " + (", ".join(_cors_origins) if _cors_origins else "any (set CORS_ORIGINS to restrict)"))
     print(f"Embedding provider: {EMBEDDING_PROVIDER}")
     if EMBEDDING_PROVIDER == "voyage":
         voyage_url = os.environ.get("VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings")
@@ -553,7 +614,7 @@ def _collect_sources(client):
             break
     return sorted(found.values(), key=lambda s: s["name"].lower())
 
-@app.get("/sources")
+@app.get("/sources", dependencies=[Depends(require_access)])
 async def list_sources():
     client = _get_qdrant_client()
     try:
@@ -565,7 +626,7 @@ async def list_sources():
 class DeleteSourceRequest(BaseModel):
     source_name: str
 
-@app.post("/delete-source")
+@app.post("/delete-source", dependencies=[Depends(require_access)])
 async def delete_source(req: DeleteSourceRequest):
     client = _get_qdrant_client()
     from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -587,7 +648,7 @@ async def delete_source(req: DeleteSourceRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete source: {e}")
 
-@app.post("/clear")
+@app.post("/clear", dependencies=[Depends(require_access)])
 async def clear_data():
     client = _get_qdrant_client()
     try:
@@ -610,18 +671,18 @@ def _fail_job(job_id, exc: Exception) -> HTTPException:
     _set_progress(job_id, stage="error", note=str(exc))
     return HTTPException(status_code=500, detail=f"Upload processing failed: {exc}")
 
-@app.get("/progress/{job_id}")
+@app.get("/progress/{job_id}", dependencies=[Depends(require_access)])
 async def get_progress(job_id: str):
     with _progress_lock:
         entry = _progress.get(job_id)
         return dict(entry) if entry else {"stage": "unknown", "done": 0, "total": 0, "note": ""}
 
-@app.post("/cancel/{job_id}")
+@app.post("/cancel/{job_id}", dependencies=[Depends(require_access)])
 async def cancel_job(job_id: str):
     _set_progress(job_id, cancelled=True)
     return {"message": "Cancel requested."}
 
-@app.post("/upload")
+@app.post("/upload", dependencies=[Depends(require_access)])
 async def upload_file(file: UploadFile = File(...), job_id: str | None = Form(None)):
     tmp_file = None
     try:
@@ -664,7 +725,7 @@ async def upload_file(file: UploadFile = File(...), job_id: str | None = Form(No
         except Exception:
             pass
 
-@app.post("/upload-text")
+@app.post("/upload-text", dependencies=[Depends(require_access)])
 async def upload_text(payload: TextUploadRequest):
     text = payload.text.strip()
     if not text:
@@ -710,7 +771,7 @@ def _condense_question(history, question: str) -> str:
     return rewritten if rewritten and len(rewritten) < 500 else question
 
 
-@app.post("/query")
+@app.post("/query", dependencies=[Depends(require_access)])
 async def query_document(req: QueryRequest):
     # The embedding, Qdrant and Groq calls below are blocking, so they run in worker threads
     # to keep the server responsive (e.g. to upload progress polls) while a question is answered.

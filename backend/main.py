@@ -1000,9 +1000,41 @@ def _check_query_rate(request: Request):
     )
 
 
+_GREETING_RE = re.compile(
+    r"^(?:hi+|hello+|hey+|hiya|yo|howdy|sup|good\s+(?:morning|afternoon|evening|day)|greetings)(?:\s+(?:there|again|everyone|all|easylm))?$"
+)
+_THANKS_RE = re.compile(r"^(?:thanks?|thank\s+you|thx|ty|cheers|great|nice|cool|awesome|perfect)(?:\s+(?:a\s+lot|so\s+much|very\s+much|you))?$")
+_BYE_RE = re.compile(r"^(?:bye+|goodbye|see\s+you|see\s+ya|cya|good\s*night)$")
+_HOW_ARE_YOU_RE = re.compile(r"^(?:how\s+are\s+you|how\s+are\s+you\s+doing|how's\s+it\s+going|what's\s+up|whats\s+up)$")
+
+
+def _small_talk_reply(text: str, workspace: str) -> str | None:
+    """A short answer for greetings and thanks, so they need no search and no LLM call.
+
+    Anything with a real question in it (even "hi, what is RAG?") does not match and goes through RAG.
+    """
+    plain = re.sub(r"[^a-z' ]+", " ", text.lower())
+    plain = re.sub(r"\s+", " ", plain).strip()
+    if not plain or len(plain) > 40:
+        return None
+    topic = "the demo guide" if workspace == DEMO_WORKSPACE else "your documents"
+    if _GREETING_RE.match(plain):
+        return f"Hi! Ask me anything about {topic}."
+    if _HOW_ARE_YOU_RE.match(plain):
+        return f"I'm doing well, thanks for asking. What would you like to know about {topic}?"
+    if _THANKS_RE.match(plain):
+        return "You're welcome! Ask me anything else whenever you like."
+    if _BYE_RE.match(plain):
+        return "Goodbye! Come back any time."
+    return None
+
+
 @app.post("/query")
 async def query_document(req: QueryRequest, request: Request):
     workspace = await _authorize(request, req.workspace, write=False)
+    small_talk = _small_talk_reply(req.query, workspace)
+    if small_talk:
+        return {"answer": small_talk, "source_chunks": []}
     _check_query_rate(request)
     # The embedding, Qdrant and Groq calls below are blocking, so they run in worker threads
     # to keep the server responsive (e.g. to upload progress polls) while a question is answered.

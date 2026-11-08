@@ -7,6 +7,10 @@ import HomePage from './components/HomePage'
 import LandingPage from './components/LandingPage'
 import Modal from './components/Modal'
 
+const STORAGE_KEY = 'easylm:v1'
+const MAX_SOURCES = 5
+const MAX_HISTORY_TURNS = 6
+
 const SUPPORTED_EXTENSIONS = ['.pdf', '.csv']
 const SUPPORTED_LABEL = 'PDF or CSV'
 // While dragging, browsers only expose the MIME type (not the file name). Windows reports CSVs as
@@ -46,6 +50,28 @@ function classifyDrag(dataTransfer) {
   return DRAG_OK_MIME_TYPES.has(type) ? 'ok' : 'bad'
 }
 
+const SEED_MESSAGE = {
+  id: 'seed-assistant',
+  role: 'assistant',
+  text: 'Add one or more sources (clipboard text or files), then ask your question. EasyLM will retrieve context across all active sources collectively.'
+}
+
+// The chat and the list of sources survive a page refresh (the vectors already live in the database).
+function loadSavedState() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null')
+    if (!data) return { messages: [SEED_MESSAGE], sources: [] }
+    const messages = Array.isArray(data.messages)
+      ? data.messages.filter((m) => m && m.id && m.status !== 'typing').map(({ status, ...rest }) => rest) // eslint-disable-line no-unused-vars
+      : []
+    return {
+      messages: messages.length ? messages : [SEED_MESSAGE],
+      sources: Array.isArray(data.sources) ? data.sources : []
+    }
+  } catch {
+    return { messages: [SEED_MESSAGE], sources: [] }
+  }
+}
 
 function App() {
   const navigate = useNavigate()
@@ -56,14 +82,9 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [clipboardText, setClipboardText] = useState('')
   const [pdfFile, setPdfFile] = useState(null)
-  const [sources, setSources] = useState([])
-  const [messages, setMessages] = useState([
-    {
-      id: 'seed-assistant',
-      role: 'assistant',
-      text: 'Add one or more sources (clipboard text or files), then ask your question. EasyLM will retrieve context across all active sources collectively.'
-    }
-  ])
+  const [initialState] = useState(loadSavedState)
+  const [sources, setSources] = useState(initialState.sources)
+  const [messages, setMessages] = useState(initialState.messages)
   const [input, setInput] = useState('')
   const [sourceMode, setSourceMode] = useState('text')
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -95,6 +116,21 @@ function App() {
     sourcesRef.current = sources
   }, [sources])
 
+  // Persist the conversation and the source list (not the in-flight typing state or blob URLs).
+  useEffect(() => {
+    try {
+      const savedMessages = messages
+        .filter((m) => m.status !== 'typing')
+        .slice(-60)
+        .map(({ status, ...rest }) => rest) // eslint-disable-line no-unused-vars
+      const savedSources = sources
+        .filter((s) => !s.removing)
+        .map(({ previewUrl, removing, ...rest }) => rest) // eslint-disable-line no-unused-vars
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages: savedMessages, sources: savedSources }))
+    } catch {
+      // storage can be unavailable (private window, quota); the app works without it
+    }
+  }, [messages, sources])
 
   // Cross-fade between pages with the View Transitions API where the browser has it.
   const supportsViewTransitions = typeof document !== 'undefined' && 'startViewTransition' in document
@@ -279,7 +315,8 @@ function App() {
     clearTypingTimer(messageId)
 
     let currentIndex = 0
-    const stepSize = Math.max(1, Math.ceil(fullText.length / 42))
+    // ~14 ticks of 18 ms: still reads as typing, but doesn't add a second after the answer arrives
+    const stepSize = Math.max(1, Math.ceil(fullText.length / 14))
     const timerId = setInterval(() => {
       currentIndex = Math.min(fullText.length, currentIndex + stepSize)
 
@@ -397,14 +434,14 @@ function App() {
       return
     }
 
-    if (sources.length >= 5) {
+    if (sources.length >= MAX_SOURCES) {
       setMessages((prev) => [
         ...prev,
         {
           id: `source-limit-${Date.now()}`,
           role: 'assistant',
           variant: 'warning',
-          text: 'You can keep up to 5 sources at the same time. Remove one to add another.'
+          text: `You can keep up to ${MAX_SOURCES} sources at the same time. Remove one to add another.`
         }
       ])
       return
@@ -613,6 +650,13 @@ function App() {
     setIsModalOpen(false)
   }
 
+  const newChat = () => {
+    typingTimersRef.current.forEach((timerId) => clearInterval(timerId))
+    typingTimersRef.current.clear()
+    setMessages([SEED_MESSAGE])
+    setIsBusy(false)
+  }
+
   const clearSources = async () => {
     setIsBusy(true)
     try {
@@ -663,16 +707,23 @@ function App() {
     if (!hasSource) {
       setMessages((prev) => [
         ...prev,
-        { id: `user-${Date.now()}`, role: 'user', text: trimmed },
+        { id: `user-${Date.now()}`, role: 'user', text: trimmed, skipHistory: true },
         {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
-          text: 'Please add a source first using Add Sources.'
+          text: 'Please add a source first using Add Sources.',
+          skipHistory: true
         }
       ])
       setInput('')
       return
     }
+
+    // The last few real question/answer turns, so follow-ups like "and its battery?" make sense.
+    const history = messages
+      .filter((m) => m.id !== SEED_MESSAGE.id && !m.variant && !m.skipHistory && m.text && m.status !== 'typing')
+      .slice(-MAX_HISTORY_TURNS)
+      .map((m) => ({ role: m.role, content: m.text }))
 
     const userMessageId = `user-${Date.now()}`
     const assistantMessageId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -694,7 +745,7 @@ function App() {
       const response = await fetch(`${apiBaseUrl}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: trimmed })
+        body: JSON.stringify({ query: trimmed, history })
       })
 
       if (!response.ok) {
@@ -746,7 +797,7 @@ function App() {
               onSend={sendMessage}
               onOpenModal={() => setIsModalOpen(true)}
               onClearSources={clearSources}
-              onBackToLanding={() => navigate('/')}
+              onNewChat={newChat}
               isBusy={isBusy}
               busyLabel={uploadStage ? 'Indexing...' : 'Thinking...'}
               onEnterSend={sendMessage}

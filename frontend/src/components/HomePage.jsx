@@ -77,7 +77,7 @@ function HomePage({
   onSend,
   onOpenModal,
   onClearSources,
-  onBackToLanding,
+  onNewChat,
   isBusy,
   busyLabel = 'Thinking...',
   onEnterSend,
@@ -85,15 +85,17 @@ function HomePage({
   onRemoveSource,
   isDragging
 }) {
-  const messagesEndRef = useRef(null)
   const messagesContainerRef = useRef(null)
+  const lastMessageCountRef = useRef(0)
 
   useEffect(() => {
     const container = messagesContainerRef.current
-    if (container) {
-      container.scrollTop = container.scrollHeight
-    }
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    if (!container) return
+    // Smooth-scroll only when a new message arrives. While an answer is being typed out the
+    // text changes every tick, and restarting a smooth scroll that often made the chat janky.
+    const isNewMessage = messages.length !== lastMessageCountRef.current
+    lastMessageCountRef.current = messages.length
+    container.scrollTo({ top: container.scrollHeight, behavior: isNewMessage ? 'smooth' : 'auto' })
   }, [messages])
 
   return (
@@ -149,13 +151,16 @@ function HomePage({
             <h3>Chat</h3>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span className="badge online">Ready</span>
+              <button className="btn" onClick={onNewChat} disabled={isBusy || messages.length <= 1} style={{ padding: '6px 12px', fontSize: '12px' }}>
+                New chat
+              </button>
               <button className="btn primary" onClick={onOpenModal} disabled={isBusy} style={{ padding: '6px 12px', fontSize: '12px' }}>
                 + Add Source
               </button>
             </div>
           </div>
 
-          <div className="messages" ref={messagesContainerRef}>
+          <div className="messages" ref={messagesContainerRef} aria-live="polite">
             {messages.map((msg, index) => (
               <div
                 key={msg.id || `${msg.role}-${index}`}
@@ -175,14 +180,13 @@ function HomePage({
                 )}
               </div>
             ))}
-            <div ref={messagesEndRef} />
           </div>
 
           <div className="composer">
             <input
               value={input}
               onChange={(event) => onInputChange(event.target.value)}
-              placeholder="Upload to get answers"
+              placeholder={hasSource ? 'Ask a question about your sources' : 'Add a source to get started'}
               aria-label="Question input"
               disabled={isBusy}
               onKeyDown={(event) => {

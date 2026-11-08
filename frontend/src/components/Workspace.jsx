@@ -6,9 +6,12 @@ import Modal from './Modal'
 import { API_BASE, apiFetch, authHeaders, errorMessage, notifyUnauthorized } from '../api'
 import { useAuth } from '../auth/authContext'
 import { getFile, putFile, removeFile } from '../fileStore'
-import { useGo, workspaceUrl } from '../nav'
+import { findBySegment, segmentFor, useGo, workspaceUrl } from '../nav'
 
-const STORAGE_PREFIX = 'easylm:v1'
+const STORAGE_PREFIX = 'easylm:v2'
+const LEGACY_PREFIX = 'easylm:v1' // one chat per workspace, before chats existed
+const MAX_CHATS = 20
+const DEFAULT_CHAT_NAME = /^Chat \d+$/
 const MAX_SOURCES = 5
 const MAX_HISTORY_TURNS = 6
 
@@ -73,20 +76,46 @@ const DEMO_SUGGESTIONS = [
   'What are the upload limits?'
 ]
 
-// The chat and the list of sources survive a page refresh (the vectors already live in the database).
-// The demo workspace keeps only its chat: its sources always come from the server.
-function loadSavedState(storageKey, seed, keepSources) {
-  const fresh = { messages: [seed], sources: [] }
+// The chats and the list of sources survive a page refresh (the vectors already live in the database).
+// The demo workspace keeps only its chats: its sources always come from the server.
+const cleanMessages = (messages, seed) => {
+  const kept = Array.isArray(messages)
+    ? messages.filter((m) => m && m.id && m.status !== 'typing').map(({ status, ...rest }) => rest) // eslint-disable-line no-unused-vars
+    : []
+  return kept.length ? kept : [seed]
+}
+
+const newChatRecord = (id, seed) => ({ id: String(id), name: `Chat ${id}`, custom: false, messages: [seed], updated: Date.now() })
+
+const chatItems = (chats) => chats.map((c) => ({ id: c.id, name: c.name, custom: Boolean(c.custom) }))
+
+const shortenForName = (text) => {
+  const plain = text.replace(/\s+/g, ' ').trim()
+  return plain.length > 32 ? `${plain.slice(0, 32).trimEnd()}…` : plain
+}
+
+function loadSavedState(workspaceId, seed, keepSources) {
+  const fresh = { chats: [newChatRecord(1, seed)], sources: [], active: null }
   try {
-    const data = JSON.parse(localStorage.getItem(storageKey) || 'null')
-    if (!data) return fresh
-    const messages = Array.isArray(data.messages)
-      ? data.messages.filter((m) => m && m.id && m.status !== 'typing').map(({ status, ...rest }) => rest) // eslint-disable-line no-unused-vars
-      : []
-    return {
-      messages: messages.length ? messages : [seed],
-      sources: keepSources && Array.isArray(data.sources) ? data.sources : []
+    const data = JSON.parse(localStorage.getItem(`${STORAGE_PREFIX}:${workspaceId}`) || 'null')
+    if (data && Array.isArray(data.chats) && data.chats.length) {
+      const chats = data.chats
+        .filter((c) => c && typeof c.id === 'string' && typeof c.name === 'string')
+        .map((c) => ({ ...c, custom: Boolean(c.custom), messages: cleanMessages(c.messages, seed) }))
+      if (chats.length) {
+        return { chats, sources: keepSources && Array.isArray(data.sources) ? data.sources : [], active: data.active || null }
+      }
     }
+    // chats saved by the version that had a single conversation become "Chat 1"
+    const legacy = JSON.parse(localStorage.getItem(`${LEGACY_PREFIX}:${workspaceId}`) || 'null')
+    if (legacy) {
+      return {
+        chats: [{ ...newChatRecord(1, seed), messages: cleanMessages(legacy.messages, seed) }],
+        sources: keepSources && Array.isArray(legacy.sources) ? legacy.sources : [],
+        active: null
+      }
+    }
+    return fresh
   } catch {
     return fresh
   }
@@ -94,14 +123,13 @@ function loadSavedState(storageKey, seed, keepSources) {
 
 // One workspace: its sources, its chat and everything around them. `readOnly` is the shared demo
 // workspace that guests use; otherwise this is one of the logged-in user's own workspaces.
-function Workspace({ workspaceId, readOnly }) {
+function Workspace({ workspaceId, readOnly, chatSegment }) {
   const { user, logout, addWorkspace, renameWorkspace } = useAuth()
   const go = useGo()
   const navigate = useNavigate()
   // Switching between workspaces keeps the page frame and only refreshes the panels (see the is-switch CSS).
   const location = useLocation()
   const [switched] = useState(() => Boolean(location.state?.switch))
-  const storageKey = `${STORAGE_PREFIX}:${workspaceId}`
   const seed = readOnly ? DEMO_SEED_MESSAGE : SEED_MESSAGE
   const typingTimersRef = useRef(new Map())
   const sourcesRef = useRef([])
@@ -110,9 +138,30 @@ function Workspace({ workspaceId, readOnly }) {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [clipboardText, setClipboardText] = useState('')
   const [pdfFile, setPdfFile] = useState(null)
-  const [initialState] = useState(() => loadSavedState(storageKey, seed, !readOnly))
+  const [initialState] = useState(() => loadSavedState(workspaceId, seed, !readOnly))
   const [sources, setSources] = useState(initialState.sources)
-  const [messages, setMessages] = useState(initialState.messages)
+  const [chats, setChats] = useState(initialState.chats)
+  // The link says which chat is open; an unknown or missing one falls back to the last one used.
+  const resolvedChat = findBySegment(chatItems(chats), chatSegment)
+  const fallbackChat = chats.find((c) => c.id === initialState.active) || chats[chats.length - 1]
+  const activeChat = chats.find((c) => c.id === resolvedChat?.id) || fallbackChat
+  const messages = activeChat.messages
+  const activeIdRef = useRef(activeChat.id)
+  useEffect(() => {
+    activeIdRef.current = activeChat.id
+  }, [activeChat.id])
+
+  // Update one chat's messages. Answers are typed out over time, so they carry the id of the chat
+  // they belong to and keep landing there even if another chat is opened meanwhile.
+  const setChatMessages = (chatId, updater) =>
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId
+          ? { ...c, messages: typeof updater === 'function' ? updater(c.messages) : updater, updated: Date.now() }
+          : c
+      )
+    )
+  const setMessages = (updater) => setChatMessages(activeIdRef.current, updater)
   const [input, setInput] = useState('')
   const [sourceMode, setSourceMode] = useState('text')
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -146,21 +195,27 @@ function Workspace({ workspaceId, readOnly }) {
     sourcesRef.current = sources
   }, [sources])
 
-  // Persist the conversation and the source list (not the in-flight typing state or blob URLs).
+  // Persist the chats and the source list (not the in-flight typing state or blob URLs).
   useEffect(() => {
     try {
-      const savedMessages = messages
-        .filter((m) => m.status !== 'typing')
-        .slice(-60)
-        .map(({ status, ...rest }) => rest) // eslint-disable-line no-unused-vars
+      const savedChats = chats.map((c) => ({
+        ...c,
+        messages: c.messages
+          .filter((m) => m.status !== 'typing')
+          .slice(-60)
+          .map(({ status, ...rest }) => rest) // eslint-disable-line no-unused-vars
+      }))
       const savedSources = sources
         .filter((s) => !s.removing)
         .map(({ previewUrl, removing, ...rest }) => rest) // eslint-disable-line no-unused-vars
-      localStorage.setItem(storageKey, JSON.stringify({ messages: savedMessages, sources: readOnly ? [] : savedSources }))
+      localStorage.setItem(
+        `${STORAGE_PREFIX}:${workspaceId}`,
+        JSON.stringify({ chats: savedChats, active: activeChat.id, sources: readOnly ? [] : savedSources })
+      )
     } catch {
       // storage can be unavailable (private window, quota); the app works without it
     }
-  }, [messages, sources, storageKey, readOnly])
+  }, [chats, sources, activeChat.id, workspaceId, readOnly])
 
   useEffect(() => {
     document.title = readOnly ? `${siteName} · Live demo` : `${siteName} · Workspace`
@@ -422,11 +477,11 @@ function Workspace({ workspaceId, readOnly }) {
     }
   }
 
-  const updateMessageById = (id, patch) => {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)))
+  const updateMessageById = (id, patch, chatId = activeIdRef.current) => {
+    setChatMessages(chatId, (prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)))
   }
 
-  const animateAssistantMessage = (messageId, fullText, onComplete) => {
+  const animateAssistantMessage = (messageId, fullText, onComplete, chatId = activeIdRef.current) => {
     clearTypingTimer(messageId)
 
     let currentIndex = 0
@@ -435,7 +490,7 @@ function Workspace({ workspaceId, readOnly }) {
     const timerId = setInterval(() => {
       currentIndex = Math.min(fullText.length, currentIndex + stepSize)
 
-      setMessages((prevMessages) =>
+      setChatMessages(chatId, (prevMessages) =>
         prevMessages.map((message) =>
           message.id === messageId
             ? {
@@ -765,13 +820,6 @@ function Workspace({ workspaceId, readOnly }) {
     setIsModalOpen(false)
   }
 
-  const newChat = () => {
-    typingTimersRef.current.forEach((timerId) => clearInterval(timerId))
-    typingTimersRef.current.clear()
-    setMessages([seed])
-    setIsBusy(false)
-  }
-
   const clearSources = async () => {
     setIsBusy(true)
     try {
@@ -846,8 +894,17 @@ function Workspace({ workspaceId, readOnly }) {
 
     const userMessageId = `user-${Date.now()}`
     const assistantMessageId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const chatId = activeIdRef.current
 
-    setMessages((prev) => [
+    // a chat still called "Chat 3" takes the name of its first question
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId && !c.custom && DEFAULT_CHAT_NAME.test(c.name) && !c.messages.some((m) => m.role === 'user')
+          ? { ...c, name: shortenForName(trimmed) }
+          : c
+      )
+    )
+    setChatMessages(chatId, (prev) => [
       ...prev,
       { id: userMessageId, role: 'user', text: trimmed },
       {
@@ -880,16 +937,15 @@ function Workspace({ workspaceId, readOnly }) {
         assistantMessageId,
         data.answer || 'No answer returned.',
         () => {
-          updateMessageById(assistantMessageId, { citations: citationChunks })
+          updateMessageById(assistantMessageId, { citations: citationChunks }, chatId)
           setIsBusy(false)
-        }
+        },
+        chatId
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Query failed.'
-      updateMessageById(assistantMessageId, { variant: 'error' })
-      animateAssistantMessage(assistantMessageId, `Error calling backend: ${message}`, () =>
-        setIsBusy(false)
-      )
+      updateMessageById(assistantMessageId, { variant: 'error' }, chatId)
+      animateAssistantMessage(assistantMessageId, `Error calling backend: ${message}`, () => setIsBusy(false), chatId)
     }
   }
 
@@ -901,11 +957,70 @@ function Workspace({ workspaceId, readOnly }) {
     if (target) navigate(workspaceUrl(user.username, target, user.workspaces), { state: { switch: true } })
   }
 
-  // ---- rename dialog (workspaces here; chats reuse it) ----
-  const [renameModal, setRenameModal] = useState({ open: false, value: '', error: '', busy: false })
+  // ---- chats: several named conversations per workspace, each with its own link ----
+  const chatSegmentOf = (chat, list) => {
+    const items = chatItems(list)
+    return segmentFor(items.find((i) => i.id === chat.id), items)
+  }
+
+  // Link to a chat (inside the given workspace entry, which can be a just-renamed one).
+  const chatUrl = (chat, list = chats, workspace = currentWorkspace, workspaces = user?.workspaces) =>
+    readOnly
+      ? `/demo/chats/${chatSegmentOf(chat, list)}`
+      : workspaceUrl(user.username, workspace, workspaces, chatSegmentOf(chat, list))
+
+  // A link without a valid chat is rewritten to the chat that is actually shown.
+  useEffect(() => {
+    if (!resolvedChat) navigate(chatUrl(activeChat), { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedChat?.id, chatSegment])
+
+  const selectChat = (id) => {
+    const chat = chats.find((c) => c.id === id)
+    if (chat && chat.id !== activeChat.id) navigate(chatUrl(chat))
+  }
+
+  const createChat = () => {
+    if (chats.length >= MAX_CHATS) {
+      showToast(`You can keep up to ${MAX_CHATS} chats. Delete one to start another.`)
+      return
+    }
+    // an unused chat is reused instead of piling up empty ones
+    const unused = chats.find((c) => !c.messages.some((m) => m.role === 'user'))
+    if (unused) {
+      if (unused.id === activeChat.id) showToast('This chat is still empty. Ask something here first.', 'info')
+      else navigate(chatUrl(unused))
+      return
+    }
+    const nextId = Math.max(0, ...chats.map((c) => Number(c.id) || 0)) + 1
+    const chat = newChatRecord(nextId, seed)
+    setChats((prev) => [...prev, chat])
+    navigate(chatUrl(chat, [...chats, chat]))
+  }
+
+  const [chatDelete, setChatDelete] = useState({ open: false, id: null, name: '' })
+
+  const confirmChatDelete = () => {
+    const { id } = chatDelete
+    setChatDelete((prev) => ({ ...prev, open: false }))
+    const remaining = chats.filter((c) => c.id !== id)
+    const next = remaining.length ? remaining : [newChatRecord(1, seed)]
+    setChats(next)
+    if (id === activeChat.id) navigate(chatUrl(next[next.length - 1], next), { replace: true })
+  }
+
+  // ---- rename dialog, for a workspace or a chat ----
+  const [renameModal, setRenameModal] = useState({ open: false, kind: 'workspace', id: null, value: '', error: '', busy: false })
 
   const openRenameWorkspace = () =>
-    setRenameModal({ open: true, value: currentWorkspace?.name || '', error: '', busy: false })
+    setRenameModal({ open: true, kind: 'workspace', id: workspaceNumber, value: currentWorkspace?.name || '', error: '', busy: false })
+
+  const openRenameChat = (id) => {
+    const chat = chats.find((c) => c.id === id)
+    if (chat) setRenameModal({ open: true, kind: 'chat', id, value: chat.name, error: '', busy: false })
+  }
+
+  const closeRename = () => setRenameModal((prev) => ({ ...prev, open: false }))
 
   const submitRename = async (event) => {
     event.preventDefault()
@@ -914,13 +1029,22 @@ function Workspace({ workspaceId, readOnly }) {
       setRenameModal((prev) => ({ ...prev, error: 'Please enter a name.' }))
       return
     }
+    if (renameModal.kind === 'chat') {
+      const renamed = chats.map((c) => (c.id === renameModal.id ? { ...c, name: value.slice(0, 40), custom: true } : c))
+      setChats(renamed)
+      closeRename()
+      // the link uses the new name, so move to it without adding a history entry
+      if (renameModal.id === activeChat.id) {
+        navigate(chatUrl(renamed.find((c) => c.id === activeChat.id), renamed), { replace: true })
+      }
+      return
+    }
     setRenameModal((prev) => ({ ...prev, busy: true, error: '' }))
     try {
       const updated = await renameWorkspace(workspaceNumber, value)
-      setRenameModal((prev) => ({ ...prev, open: false, busy: false }))
-      // the link uses the new name, so move to it without adding a history entry
+      closeRename()
       const all = user.workspaces.map((w) => (w.n === updated.n ? updated : w))
-      navigate(workspaceUrl(user.username, updated, all), { replace: true })
+      navigate(chatUrl(activeChat, chats, updated, all), { replace: true })
     } catch (err) {
       setRenameModal((prev) => ({ ...prev, busy: false, error: err.message }))
     }
@@ -958,7 +1082,12 @@ function Workspace({ workspaceId, readOnly }) {
         onSend={() => sendMessage()}
         onOpenModal={() => setIsModalOpen(true)}
         onClearSources={clearSources}
-        onNewChat={newChat}
+        onNewChat={createChat}
+        chats={chats.map((c) => ({ id: c.id, name: c.name, count: c.messages.filter((m) => m.role === 'user').length }))}
+        activeChatId={activeChat.id}
+        onSelectChat={selectChat}
+        onRenameChat={openRenameChat}
+        onDeleteChat={(id) => setChatDelete({ open: true, id, name: chats.find((c) => c.id === id)?.name || '' })}
         isBusy={isBusy}
         busyLabel={uploadStage ? 'Indexing...' : 'Thinking...'}
         onEnterSend={() => sendMessage()}
@@ -973,7 +1102,7 @@ function Workspace({ workspaceId, readOnly }) {
         onNewWorkspace={createWorkspace}
         onLogout={leave}
         onLogin={() => go('/login')}
-        suggestions={readOnly && messages.length <= 1 ? DEMO_SUGGESTIONS : []}
+        suggestions={readOnly && !messages.some((m) => m.role === 'user') ? DEMO_SUGGESTIONS : []}
         onSuggest={sendMessage}
         onOpenCitation={(citation, number) =>
           setCitationModal({
@@ -1039,24 +1168,48 @@ function Workspace({ workspaceId, readOnly }) {
         <div className="top-progress-fill" style={{ width: `${uploadProgress}%` }} />
       </div>
 
+      {/* delete a chat */}
+      <Modal
+        open={chatDelete.open}
+        onClose={() => setChatDelete((prev) => ({ ...prev, open: false }))}
+        className="confirm-modal"
+        label="Delete chat"
+      >
+        <div className="modal-head">
+          <h3>Delete chat?</h3>
+        </div>
+        <p className="confirm-text">
+          <strong>{chatDelete.name || 'This chat'}</strong> and all of its messages will be removed from this browser. Your
+          sources are not affected.
+        </p>
+        <div className="modal-actions">
+          <button className="btn" onClick={() => setChatDelete((prev) => ({ ...prev, open: false }))}>
+            Cancel
+          </button>
+          <button className="btn danger" onClick={confirmChatDelete}>
+            Delete
+          </button>
+        </div>
+      </Modal>
+
       {/* rename */}
-      <Modal open={renameModal.open} onClose={() => setRenameModal((prev) => ({ ...prev, open: false }))} className="rename-modal" label="Rename workspace">
+      <Modal open={renameModal.open} onClose={closeRename} className="rename-modal" label={`Rename ${renameModal.kind}`}>
         <form onSubmit={submitRename}>
           <div className="modal-head">
-            <h3>Rename workspace</h3>
+            <h3>Rename {renameModal.kind}</h3>
           </div>
           <input
             className="rename-input"
             value={renameModal.value}
             maxLength={40}
             autoFocus
-            aria-label="Workspace name"
+            aria-label={`${renameModal.kind === 'chat' ? 'Chat' : 'Workspace'} name`}
             onChange={(event) => setRenameModal((prev) => ({ ...prev, value: event.target.value }))}
             disabled={renameModal.busy}
           />
           {renameModal.error && <p className="auth-error" role="alert">{renameModal.error}</p>}
           <div className="modal-actions">
-            <button type="button" className="btn" onClick={() => setRenameModal((prev) => ({ ...prev, open: false }))}>
+            <button type="button" className="btn" onClick={closeRename}>
               Cancel
             </button>
             <button type="submit" className="btn primary" disabled={renameModal.busy}>

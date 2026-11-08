@@ -43,6 +43,46 @@ function BotIcon() {
   )
 }
 
+function ChatList({ chats, activeChatId, isBusy, onSelect, onNew, onRename, onDelete }) {
+  return (
+    <section className="chat-list" aria-label="Chats">
+      <div className="section-head">
+        <h3>Chats</h3>
+        <button className="ws-new" onClick={onNew} disabled={isBusy} title="Start a new chat">
+          + New chat
+        </button>
+      </div>
+      <ul className="chat-items">
+        {chats.map((chat) => (
+          <li key={chat.id} className={`chat-item ${chat.id === activeChatId ? 'active' : ''}`}>
+            <button
+              type="button"
+              className="chat-item-main"
+              onClick={() => onSelect(chat.id)}
+              aria-current={chat.id === activeChatId ? 'true' : undefined}
+            >
+              <span className="chat-item-name" title={chat.name}>
+                {chat.name}
+              </span>
+              <span className="chat-item-meta">
+                {chat.count === 0 ? 'No questions yet' : `${chat.count} question${chat.count === 1 ? '' : 's'}`}
+              </span>
+            </button>
+            <span className="chat-item-actions">
+              <button className="icon-btn" title="Rename chat" aria-label={`Rename ${chat.name}`} onClick={() => onRename(chat.id)}>
+                <PencilIcon />
+              </button>
+              <button className="icon-btn danger" title="Delete chat" aria-label={`Delete ${chat.name}`} onClick={() => onDelete(chat.id)}>
+                <TrashIcon />
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 function formatBytes(bytes) {
   if (!bytes) return ''
   if (bytes < 1024) return `${bytes} B`
@@ -104,6 +144,11 @@ function HomePage({
   onOpenModal,
   onClearSources,
   onNewChat,
+  chats = [],
+  activeChatId,
+  onSelectChat,
+  onRenameChat,
+  onDeleteChat,
   isBusy,
   busyLabel = 'Thinking...',
   onEnterSend,
@@ -209,6 +254,7 @@ function HomePage({
       </header>
 
       <div className="app-grid">
+        <div className="side-col">
         <aside className={`source-summary ${isDragging ? 'drop-zone' : ''}`}>
           <div className="section-head">
             <h3>Sources</h3>
@@ -253,6 +299,17 @@ function HomePage({
           </div>
         </aside>
 
+        <ChatList
+          chats={chats}
+          activeChatId={activeChatId}
+          isBusy={isBusy}
+          onSelect={onSelectChat}
+          onNew={onNewChat}
+          onRename={onRenameChat}
+          onDelete={onDeleteChat}
+        />
+        </div>
+
         <div className={`chat-box ${isDragging ? 'drop-zone' : ''}`}>
           <div className="section-head">
             <h3>Chat</h3>
@@ -276,7 +333,7 @@ function HomePage({
             </div>
           )}
 
-          <div className="messages" ref={messagesContainerRef} aria-live="polite">
+          <div className="messages" key={activeChatId} ref={messagesContainerRef} aria-live="polite">
             {messages.map((msg, index) => (
               <div key={msg.id || `${msg.role}-${index}`} className={`msg-row ${msg.role}`}>
                 {msg.role === 'user' ? (

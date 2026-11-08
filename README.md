@@ -81,8 +81,9 @@ The frontend runs on port 5173 (Vite uses the next free port if that one is take
 1. Open the frontend in your browser. Press "Try the live demo" to ask questions about a bundled sample document straight away, no account needed, or log in / create an account to use your own workspaces.
 2. In your own workspace, add a source: drop a PDF or CSV anywhere on the page, use Add Sources, or paste text (up to 5 sources at once).
 3. Wait for the content to be processed and indexed. The dialog shows the real progress and you can cancel.
-4. Ask a question about the uploaded content. Follow-up questions work because the recent conversation is sent along.
-5. Read the answer and check the source citations.
+4. Ask a question about the uploaded content. Follow-up questions work because the recent conversation is sent along. Greetings and thanks get a short direct reply.
+5. Read the answer and click a citation chip, such as [1], to open the exact passage with its file and page.
+6. Keep several conversations: the Chats list under the sources has "+ New chat", rename and delete (up to 20 per workspace). Each chat has its own link, for example `/u/jane/workspace/1/chats/2`.
 
 ## Deploying (for example Vercel + Render)
 
@@ -106,6 +107,8 @@ Nobody needs an account to see the app. Visitors can:
 - **Create an account** (username and password, 8+ characters): each user gets private workspaces (up to 5, `MAX_WORKSPACES_PER_USER`) with their own links, such as `/u/yourname/workspace/1`. Only the owner can open a workspace, and the upload, delete and clear controls exist only there. Deleting or clearing only ever touches that one workspace's documents.
 
 Passwords are hashed with scrypt. Sessions are signed, stateless tokens (30 days) sent in the `Authorization` header. Users are stored in a small Qdrant collection (`USERS_COLLECTION`, default `easylm_users`), so they survive restarts. Every document point carries a `workspace` field and every search, listing and delete is filtered by it.
+
+Workspaces can be renamed with the pencil button next to the switcher. Links use the custom name when it is unique (`/u/jane/workspace/thesis`) and the stable id otherwise; both always work. A new workspace can only be created once the existing ones contain something. Chats are kept in the browser only (per workspace), so they do not follow you to another device.
 
 To change the demo document edit `backend/demo/make_demo_pdf.py` (needs `pip install reportlab`) and run it, or drop any PDF into `backend/demo/`.
 

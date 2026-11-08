@@ -2278,3 +2278,136 @@ html.no-vt .app.is-switch > .workspace {
     font-size: 24px;
   }
 }
+
+/* ---- Chats: a list under the sources, one conversation open at a time ---- */
+.side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-height: 0;
+  height: 100%;
+}
+
+.side-col .source-summary {
+  flex: 1 1 0;
+  min-height: 150px;
+}
+
+.chat-list {
+  flex: 0 1 auto;
+  max-height: 46%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 14px;
+  border-radius: 24px;
+  border: 1px solid rgba(130, 78, 37, 0.2);
+  background: linear-gradient(170deg, rgba(255, 249, 236, 0.9), rgba(245, 222, 171, 0.72));
+  box-shadow: 0 20px 34px -30px rgba(73, 38, 14, 0.5);
+}
+
+.chat-items {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.chat-item {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.chat-item:hover {
+  background: rgba(255, 250, 236, 0.7);
+}
+
+.chat-item.active {
+  background: rgba(255, 250, 236, 0.95);
+  border-color: rgba(194, 116, 47, 0.55);
+  box-shadow: 0 8px 18px -14px rgba(85, 47, 20, 0.6);
+}
+
+.chat-item-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  padding: 8px 10px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.chat-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: #4b2b12;
+}
+
+.chat-item-meta {
+  font-size: 12px;
+  color: #7a5535;
+}
+
+.chat-item-actions {
+  display: flex;
+  gap: 2px;
+  padding-right: 6px;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
+.chat-item:hover .chat-item-actions,
+.chat-item:focus-within .chat-item-actions,
+.chat-item.active .chat-item-actions {
+  opacity: 1;
+}
+
+/* opening another chat: the conversation fades in instead of snapping */
+.messages {
+  animation: chatSwap 260ms ease-out both;
+}
+
+@keyframes chatSwap {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 1100px) {
+  .side-col {
+    height: auto;
+  }
+
+  .side-col .source-summary {
+    flex: none;
+    max-height: 360px;
+  }
+
+  .chat-list {
+    max-height: 320px;
+  }
+}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import AddSourcesModal from './AddSourcesModal'
 import HomePage from './HomePage'
 import Modal from './Modal'
@@ -96,6 +97,10 @@ function loadSavedState(storageKey, seed, keepSources) {
 function Workspace({ workspaceId, readOnly }) {
   const { user, logout, addWorkspace } = useAuth()
   const go = useGo()
+  const navigate = useNavigate()
+  // Switching between workspaces keeps the page frame and only refreshes the panels (see the is-switch CSS).
+  const location = useLocation()
+  const [switched] = useState(() => Boolean(location.state?.switch))
   const storageKey = `${STORAGE_PREFIX}:${workspaceId}`
   const seed = readOnly ? DEMO_SEED_MESSAGE : SEED_MESSAGE
   const typingTimersRef = useRef(new Map())
@@ -888,12 +893,12 @@ function Workspace({ workspaceId, readOnly }) {
     }
   }
 
-  const switchWorkspace = (n) => go(workspacePath(user.username, n))
+  const switchWorkspace = (n) => navigate(workspacePath(user.username, n), { state: { switch: true } })
 
   const createWorkspace = async () => {
     try {
       const created = await addWorkspace()
-      go(workspacePath(user.username, created.n))
+      navigate(workspacePath(user.username, created.n), { state: { switch: true } })
     } catch (err) {
       showToast(err.message)
     }
@@ -910,7 +915,7 @@ function Workspace({ workspaceId, readOnly }) {
   const shownStage = uploadStage || lastStageRef.current
 
   return (
-    <div className={`app ${isDragging ? 'is-dragging' : ''}`}>
+    <div className={`app ${isDragging ? 'is-dragging' : ''} ${switched ? 'is-switch' : ''}`}>
       <HomePage
         siteName={siteName}
         hasSource={hasSource}

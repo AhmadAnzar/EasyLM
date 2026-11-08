@@ -1657,6 +1657,59 @@ html.no-vt .app > .workspace {
   animation: pageIn 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
+/* Switching workspaces: the frame (header, layout) stays put. Only the two panels refresh, with a thin
+   bar sweeping along the header like a reload. */
+.app.is-switch > .workspace,
+html.no-vt .app.is-switch > .workspace {
+  animation: none;
+}
+
+.app.is-switch .topbar {
+  position: relative;
+  overflow: hidden;
+}
+
+.app.is-switch .topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: 40%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, transparent, #c2742f, #e2ac46, transparent);
+  animation: switchSweep 650ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.app.is-switch .source-summary,
+.app.is-switch .chat-box {
+  animation: panelSwap 340ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.app.is-switch .chat-box {
+  animation-delay: 60ms;
+}
+
+@keyframes panelSwap {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes switchSweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
 /* Landing page content settles in a beat after the page itself. */
 .landing-card,
 .landing-nav {

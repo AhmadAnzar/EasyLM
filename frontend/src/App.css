@@ -1029,12 +1029,103 @@
   background: rgba(138, 78, 33, 0.12);
   border: 1px solid rgba(138, 78, 33, 0.2);
   color: #6b3e1a;
+  font: inherit;
   font-weight: 700;
-  cursor: help;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
 }
 
 .citation-chip:hover {
-  background: rgba(138, 78, 33, 0.2);
+  background: rgba(138, 78, 33, 0.22);
+  transform: translateY(-1px);
+}
+
+.citation-chip:focus-visible {
+  outline: 2px solid rgba(43, 93, 102, 0.8);
+  outline-offset: 2px;
+}
+
+/* ---- Who said it: an icon for the bot, the initial of the logged-in user (G for guests) ---- */
+.msg-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  max-width: 92%;
+}
+
+.msg-row.assistant {
+  align-self: flex-start;
+}
+
+.msg-row.user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.msg-row .bubble {
+  max-width: calc(100% - 46px);
+}
+
+.msg-avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  font-weight: 700;
+  border-radius: 50%;
+  box-shadow: 0 8px 16px -10px rgba(84, 45, 19, 0.7);
+}
+
+.msg-avatar.bot {
+  color: #fff7df;
+  background: linear-gradient(135deg, #2b5d66, #4d8e96);
+}
+
+.msg-avatar.user {
+  color: #fff7df;
+  background: linear-gradient(135deg, #8b4b23, #e2ac46);
+}
+
+/* ---- Citation viewer ---- */
+.modal.citation-modal {
+  width: min(680px, 100%);
+  max-height: min(78vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.citation-source {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: #6d4a2d;
+}
+
+.citation-source strong {
+  color: #4b2b12;
+  word-break: break-word;
+}
+
+.citation-text {
+  margin: 0;
+  padding: 14px 16px;
+  min-height: 0;
+  overflow-y: auto;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #3f2814;
+  background: rgba(255, 250, 238, 0.95);
+  border: 1px solid rgba(136, 85, 45, 0.22);
+  border-left: 4px solid #c2742f;
+  border-radius: 12px;
 }
 
 .composer {

@@ -1000,6 +1000,18 @@ def _check_query_rate(request: Request):
     )
 
 
+def _citation_from_payload(payload: dict, text: str) -> dict:
+    """One retrieved passage plus its file name and page (PDF) or row (CSV)."""
+    citation = {"text": text, "source": payload.get("source_name") or ""}
+    page = payload.get("meta_page")
+    if isinstance(page, (int, float)):
+        citation["page"] = int(page) + 1  # pypdf pages are counted from 0
+    row = payload.get("meta_row_number")
+    if isinstance(row, (int, float)):
+        citation["row"] = int(row)
+    return citation
+
+
 _GREETING_RE = re.compile(
     r"^(?:hi+|hello+|hey+|hiya|yo|howdy|sup|good\s+(?:morning|afternoon|evening|day)|greetings)(?:\s+(?:there|again|everyone|all|easylm))?$"
 )
@@ -1071,6 +1083,7 @@ async def query_document(req: QueryRequest, request: Request):
         return {"answer": "No relevant information found. Try a better question."}
 
     searched_chunks = []
+    citations = []  # the same passages with where they came from, for the "open citation" view
     for result in search_result:
         payload = None
         if hasattr(result, "payload"):
@@ -1082,8 +1095,10 @@ async def query_document(req: QueryRequest, request: Request):
             text = payload.get("text")
             if text:
                 searched_chunks.append(text)
+                citations.append(_citation_from_payload(payload, text))
         elif isinstance(payload, str) and payload.strip():
             searched_chunks.append(payload)
+            citations.append({"text": payload})
 
     if not searched_chunks:
         return {"answer": "No relevant information found. Try a better question."}
@@ -1103,14 +1118,15 @@ async def query_document(req: QueryRequest, request: Request):
         response = await run_in_threadpool(llm_instance.invoke, messages)
     except BadRequestError as error:
         if "content_filter" in str(error):
-            return {"answer": "The backend blocked this request.", "source_chunks": searched_chunks}
+            return {"answer": "The backend blocked this request.", "source_chunks": searched_chunks, "citations": citations}
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
     return {
         "answer": response.content.strip(),
-        "source_chunks": searched_chunks
+        "source_chunks": searched_chunks,
+        "citations": citations,
     }
 
 

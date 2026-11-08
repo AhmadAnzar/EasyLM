@@ -130,6 +130,7 @@ function Workspace({ workspaceId, readOnly }) {
   const [demoLoading, setDemoLoading] = useState(readOnly) // the demo document is being indexed on the server
   const [serverWaking, setServerWaking] = useState(false) // the free host is starting up after being idle
   const [previewModal, setPreviewModal] = useState({ open: false, url: '', name: '' })
+  const [citationModal, setCitationModal] = useState({ open: false, number: 1, text: '', source: '', page: null, row: null })
   const [confirmDelete, setConfirmDelete] = useState({ open: false, id: null, name: '' })
 
   const siteName = 'EasyLM'
@@ -866,7 +867,9 @@ function Workspace({ workspaceId, readOnly }) {
       }
 
       const data = await response.json()
-      const citationChunks = Array.isArray(data.source_chunks) ? data.source_chunks.slice(0, 4) : []
+      // newer servers describe each passage (text, file, page); older ones send the bare text
+      const citationChunks = (Array.isArray(data.citations) && data.citations.length ? data.citations : data.source_chunks || [])
+        .slice(0, 4)
 
       animateAssistantMessage(
         assistantMessageId,
@@ -935,6 +938,16 @@ function Workspace({ workspaceId, readOnly }) {
         onLogin={() => go('/login')}
         suggestions={readOnly && messages.length <= 1 ? DEMO_SUGGESTIONS : []}
         onSuggest={sendMessage}
+        onOpenCitation={(citation, number) =>
+          setCitationModal({
+            open: true,
+            number,
+            text: citation.text || '',
+            source: citation.source || '',
+            page: citation.page ?? null,
+            row: citation.row ?? null
+          })
+        }
         notice={
           serverWaking
             ? 'Waking up the server. It runs on free hosting that sleeps when idle, so the first visit can take up to a minute.'
@@ -988,6 +1001,29 @@ function Workspace({ workspaceId, readOnly }) {
       <div className={`top-progress ${uploadStage === 'uploading' && uploadProgress > 0 && uploadProgress < 100 ? 'visible' : ''}`}>
         <div className="top-progress-fill" style={{ width: `${uploadProgress}%` }} />
       </div>
+
+      {/* the passage a citation points to */}
+      <Modal
+        open={citationModal.open}
+        onClose={() => setCitationModal((prev) => ({ ...prev, open: false }))}
+        className="citation-modal"
+        label="Citation"
+      >
+        <div className="modal-head">
+          <h3>Citation [{citationModal.number}]</h3>
+          <button className="close" onClick={() => setCitationModal((prev) => ({ ...prev, open: false }))} aria-label="Close citation">
+            ×
+          </button>
+        </div>
+        {(citationModal.source || citationModal.page != null || citationModal.row != null) && (
+          <div className="citation-source">
+            {citationModal.source && <strong>{citationModal.source}</strong>}
+            {citationModal.page != null && <span className="count-pill">Page {citationModal.page}</span>}
+            {citationModal.row != null && <span className="count-pill">Row {citationModal.row}</span>}
+          </div>
+        )}
+        <pre className="citation-text">{citationModal.text}</pre>
+      </Modal>
 
       {/* source preview */}
       <Modal open={previewModal.open} onClose={closePreviewModal} className="preview-modal" label="Source preview">

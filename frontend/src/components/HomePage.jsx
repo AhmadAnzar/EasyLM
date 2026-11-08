@@ -20,6 +20,20 @@ function TrashIcon() {
   )
 }
 
+function BotIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="4" y="8" width="16" height="11" rx="4" />
+      <path d="M12 8V5" />
+      <circle cx="12" cy="4" r="1" />
+      <circle cx="9" cy="13" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="13" r="1.1" fill="currentColor" stroke="none" />
+      <path d="M9.5 16.2h5" />
+      <path d="M2 12v3M22 12v3" />
+    </svg>
+  )
+}
+
 function formatBytes(bytes) {
   if (!bytes) return ''
   if (bytes < 1024) return `${bytes} B`
@@ -96,8 +110,10 @@ function HomePage({
   onLogin,
   suggestions = [],
   onSuggest,
+  onOpenCitation,
   notice = ''
 }) {
+  const userInitial = user ? user.username.charAt(0).toUpperCase() : 'G'
   const messagesContainerRef = useRef(null)
   const lastMessageCountRef = useRef(0)
 
@@ -240,22 +256,30 @@ function HomePage({
 
           <div className="messages" ref={messagesContainerRef} aria-live="polite">
             {messages.map((msg, index) => (
-              <div
-                key={msg.id || `${msg.role}-${index}`}
-                className={`bubble ${msg.role} ${msg.variant || ''} ${msg.status === 'streaming' ? 'streaming' : ''}`}
-              >
-                {msg.status === 'typing' ? (
-                  <span className="typing-state" aria-label="Assistant is typing">
-                    <span className="typing-label">Thinking</span>
-                    <span className="typing-dots" aria-hidden="true">
-                      <i></i>
-                      <i></i>
-                      <i></i>
-                    </span>
+              <div key={msg.id || `${msg.role}-${index}`} className={`msg-row ${msg.role}`}>
+                {msg.role === 'user' ? (
+                  <span className="msg-avatar user" title={user ? user.username : 'Guest'} aria-hidden="true">
+                    {userInitial}
                   </span>
                 ) : (
-                  <MessageWithCitations text={msg.text} citations={msg.citations || []} />
+                  <span className="msg-avatar bot" title="EasyLM" aria-hidden="true">
+                    <BotIcon />
+                  </span>
                 )}
+                <div className={`bubble ${msg.role} ${msg.variant || ''} ${msg.status === 'streaming' ? 'streaming' : ''}`}>
+                  {msg.status === 'typing' ? (
+                    <span className="typing-state" aria-label="Assistant is typing">
+                      <span className="typing-label">Thinking</span>
+                      <span className="typing-dots" aria-hidden="true">
+                        <i></i>
+                        <i></i>
+                        <i></i>
+                      </span>
+                    </span>
+                  ) : (
+                    <MessageWithCitations text={msg.text} citations={msg.citations || []} onOpenCitation={onOpenCitation} />
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -294,12 +318,15 @@ function HomePage({
   )
 }
 
-function MessageWithCitations({ text, citations }) {
+// Older saved chats stored a citation as plain text; newer ones carry the source and page too.
+const asCitation = (citation) => (typeof citation === 'string' ? { text: citation } : citation)
+
+function MessageWithCitations({ text, citations, onOpenCitation }) {
   if (!text) {
     return null
   }
 
-  const visibleCitations = Array.isArray(citations) ? citations.filter(Boolean).slice(0, 4) : []
+  const visibleCitations = Array.isArray(citations) ? citations.filter(Boolean).map(asCitation).slice(0, 4) : []
 
   return (
     <div className="message-body">
@@ -308,9 +335,16 @@ function MessageWithCitations({ text, citations }) {
         <div className="citation-row">
           <span className="citation-label">Citations:</span>
           {visibleCitations.map((citation, index) => (
-            <span key={`${index}-${citation.slice(0, 20)}`} className="citation-chip" title={previewCitation(citation)}>
+            <button
+              key={`${index}-${(citation.text || '').slice(0, 20)}`}
+              type="button"
+              className="citation-chip"
+              title={previewCitation(citation.text || '')}
+              aria-label={`Open citation ${index + 1}`}
+              onClick={() => onOpenCitation?.(citation, index + 1)}
+            >
               [{index + 1}]
-            </span>
+            </button>
           ))}
         </div>
       )}

@@ -78,6 +78,8 @@ function HomePage({
   onSend,
   onOpenModal,
   onClearSources,
+  canLock = false,
+  onLock,
   onNewChat,
   isBusy,
   busyLabel = 'Thinking...',
@@ -112,6 +114,11 @@ function HomePage({
           <button className="btn" onClick={onClearSources} disabled={isBusy || !hasSource}>
             Clear Sources
           </button>
+          {canLock && (
+            <button className="btn" onClick={onLock} disabled={isBusy} title="Forget the access code on this device">
+              Lock
+            </button>
+          )}
         </div>
       </header>
 

@@ -6,6 +6,7 @@ import AddSourcesModal from './components/AddSourcesModal'
 import HomePage from './components/HomePage'
 import LandingPage from './components/LandingPage'
 import Modal from './components/Modal'
+import { apiFetch, authEvents, authHeaders, getAccessKey, notifyUnauthorized, setAccessKey } from './api'
 import { clearFiles, getFile, putFile, removeFile } from './fileStore'
 
 const STORAGE_KEY = 'easylm:v1'
@@ -108,6 +109,12 @@ function App() {
   const [dragKind, setDragKind] = useState('ok') // what is currently being dragged: 'ok' | 'bad' | 'multi'
   const [toast, setToast] = useState({ open: false, text: '', kind: 'error' })
   const toastTimerRef = useRef(null)
+  // Access control: the backend can require a code (APP_ACCESS_KEY). authRequired is null until checked.
+  const [authRequired, setAuthRequired] = useState(null)
+  const [accessOk, setAccessOk] = useState(false)
+  const [accessInput, setAccessInput] = useState('')
+  const [accessError, setAccessError] = useState('')
+  const [accessBusy, setAccessBusy] = useState(false)
   const [previewModal, setPreviewModal] = useState({ open: false, url: '', name: '' })
   const [confirmDelete, setConfirmDelete] = useState({ open: false, id: null, name: '' })
 
@@ -205,7 +212,7 @@ function App() {
   // that are gone from the database (cleared, different collection) are dropped from the list.
   const syncSourcesWithServer = async () => {
     try {
-      const resp = await fetch(`${apiBaseUrl}/sources`)
+      const resp = await apiFetch(`${apiBaseUrl}/sources`)
       if (!resp.ok) return // e.g. the vector database is unreachable: keep what we have
       const data = await resp.json()
       const remote = Array.isArray(data.sources) ? data.sources : []
@@ -256,11 +263,88 @@ function App() {
     }
   }
 
+  // Ask the backend whether an access code is needed, and whether the saved one still works.
   useEffect(() => {
-    syncSourcesWithServer()
-    // run once on load
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let stopped = false
+    const check = async () => {
+      try {
+        const status = await (await fetch(`${apiBaseUrl}/auth/status`)).json()
+        if (stopped) return
+        if (!status.required) {
+          setAuthRequired(false)
+          setAccessOk(true)
+          return
+        }
+        setAuthRequired(true)
+        const saved = getAccessKey()
+        if (saved) {
+          const resp = await fetch(`${apiBaseUrl}/auth/check`, { headers: { 'X-Access-Key': saved } })
+          if (stopped) return
+          if (resp.ok) {
+            setAccessOk(true)
+            return
+          }
+          setAccessKey('') // the saved code no longer works
+        }
+        setAccessOk(false)
+      } catch {
+        // backend not reachable (or an older one without access control): let the app open;
+        // any real problem is reported when something is used
+        if (!stopped) {
+          setAuthRequired(false)
+          setAccessOk(true)
+        }
+      }
+    }
+    check()
+    return () => {
+      stopped = true
+    }
+  }, [apiBaseUrl])
+
+  // A request was refused (wrong or changed code): go back to the unlock screen.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setAccessKey('')
+      setAuthRequired(true)
+      setAccessOk(false)
+    }
+    authEvents.addEventListener('unauthorized', onUnauthorized)
+    return () => authEvents.removeEventListener('unauthorized', onUnauthorized)
   }, [])
+
+  const unlock = async (candidate) => {
+    setAccessBusy(true)
+    setAccessError('')
+    try {
+      const resp = await fetch(`${apiBaseUrl}/auth/check`, { headers: { 'X-Access-Key': candidate } })
+      if (resp.ok) {
+        setAccessKey(candidate)
+        setAccessInput('')
+        setAccessOk(true)
+        return
+      }
+      const body = await resp.json().catch(() => ({}))
+      setAccessError(body.detail || 'That code did not work.')
+    } catch {
+      setAccessError('Could not reach the server. Try again in a moment.')
+    } finally {
+      setAccessBusy(false)
+    }
+  }
+
+  const lock = () => {
+    setAccessKey('')
+    setAccessInput('')
+    setAccessError('')
+    setAccessOk(false)
+  }
+
+  // Load the source list once the app is usable (straight away, or after the code is accepted).
+  useEffect(() => {
+    if (accessOk) syncSourcesWithServer()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessOk])
 
   // Used by the Add Sources dialog (file picker and its own drop zone) so every entry point
   // applies the same file-type rule.
@@ -444,7 +528,7 @@ function App() {
     stopProgressPolling()
     pollTimerRef.current = setInterval(async () => {
       try {
-        const resp = await fetch(`${apiBaseUrl}/progress/${jobId}`)
+        const resp = await apiFetch(`${apiBaseUrl}/progress/${jobId}`)
         if (!resp.ok) return
         const p = await resp.json()
         if (pollTimerRef.current === null) return // finished while this poll was in flight
@@ -499,7 +583,7 @@ function App() {
     xhrRef.current?.abort()
     abortRef.current?.abort()
     if (jobIdRef.current) {
-      fetch(`${apiBaseUrl}/cancel/${jobIdRef.current}`, { method: 'POST' }).catch(() => {})
+      apiFetch(`${apiBaseUrl}/cancel/${jobIdRef.current}`, { method: 'POST' }).catch(() => {})
     }
     stopProgressPolling()
     setUploadStage('')
@@ -556,7 +640,7 @@ function App() {
         // The text itself is tiny; the real wait is the server chunking + embedding it.
         setUploadProgress(100)
         abortRef.current = new AbortController()
-        const resp = await fetch(`${apiBaseUrl}/upload-text`, {
+        const resp = await apiFetch(`${apiBaseUrl}/upload-text`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: trimmed, job_id: jobId, source_name: textSourceName }),
@@ -574,6 +658,7 @@ function App() {
           formData.append('file', file)
           formData.append('job_id', jobId)
           xhr.open('POST', `${apiBaseUrl}/upload`)
+          Object.entries(authHeaders()).forEach(([name, value]) => xhr.setRequestHeader(name, value))
 
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
@@ -589,6 +674,7 @@ function App() {
                 reject(err)
               }
             } else {
+              if (xhr.status === 401) notifyUnauthorized()
               reject(new Error(readErrorMessage(xhr.status, xhr.responseText)))
             }
           }
@@ -702,7 +788,7 @@ function App() {
 
     setIsBusy(true)
     try {
-      const resp = await fetch(`${apiBaseUrl}/delete-source`, {
+      const resp = await apiFetch(`${apiBaseUrl}/delete-source`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source_name: sourceKey(found) })
@@ -756,7 +842,7 @@ function App() {
   const clearSources = async () => {
     setIsBusy(true)
     try {
-      const resp = await fetch(`${apiBaseUrl}/clear`, {
+      const resp = await apiFetch(`${apiBaseUrl}/clear`, {
         method: 'POST'
       })
       if (!resp.ok) throw new Error('Failed to clear database')
@@ -839,7 +925,7 @@ function App() {
     setIsBusy(true)
 
     try {
-      const response = await fetch(`${apiBaseUrl}/query`, {
+      const response = await apiFetch(`${apiBaseUrl}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: trimmed, history })
@@ -895,6 +981,8 @@ function App() {
               onSend={sendMessage}
               onOpenModal={() => setIsModalOpen(true)}
               onClearSources={clearSources}
+              canLock={authRequired === true}
+              onLock={lock}
               onNewChat={newChat}
               isBusy={isBusy}
               busyLabel={uploadStage ? 'Indexing...' : 'Thinking...'}
@@ -952,6 +1040,55 @@ function App() {
       <div className={`top-progress ${uploadStage === 'uploading' && uploadProgress > 0 && uploadProgress < 100 ? 'visible' : ''}`}>
         <div className="top-progress-fill" style={{ width: `${uploadProgress}%` }} />
       </div>
+
+      {/* access code screen: covers the page completely until the code is accepted */}
+      <Modal
+        open={onHomePage && authRequired === true && !accessOk}
+        dismissible={false}
+        onTop
+        className="gate-modal"
+        overlayClassName="gate-overlay"
+        label="Access code"
+      >
+        <form
+          className="gate"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (accessInput.trim()) unlock(accessInput.trim())
+          }}
+        >
+          <div className="gate-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="10" width="16" height="11" rx="3" />
+              <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+            </svg>
+          </div>
+          <h3>This workspace is private</h3>
+          <p className="gate-text">Enter the access code you were given to continue.</p>
+          <input
+            className="gate-input"
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            placeholder="Access code"
+            aria-label="Access code"
+            value={accessInput}
+            onChange={(event) => setAccessInput(event.target.value)}
+            disabled={accessBusy}
+          />
+          {accessError && (
+            <p className="gate-error" role="alert">
+              {accessError}
+            </p>
+          )}
+          <button className="btn primary gate-submit" type="submit" disabled={accessBusy || !accessInput.trim()}>
+            {accessBusy ? 'Checking...' : 'Unlock'}
+          </button>
+          <button className="gate-back" type="button" onClick={() => go('/')}>
+            Back to the start page
+          </button>
+        </form>
+      </Modal>
 
       {/* source preview */}
       <Modal open={previewModal.open} onClose={closePreviewModal} className="preview-modal" label="Source preview">

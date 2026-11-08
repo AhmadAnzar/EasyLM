@@ -1587,3 +1587,95 @@ html.no-vt .app > .workspace {
     animation: none;
   }
 }
+
+/* ---- Access code screen (solid background so the page behind stays hidden) ---- */
+.modal-overlay.gate-overlay {
+  background:
+    radial-gradient(circle at 15% 10%, rgba(255, 221, 139, 0.55), transparent 40%),
+    radial-gradient(circle at 85% 90%, rgba(168, 92, 43, 0.35), transparent 45%),
+    linear-gradient(150deg, #f8ecd0, #ecd199);
+}
+
+.modal.gate-modal {
+  width: min(400px, 100%);
+  padding: 32px 28px 26px;
+  text-align: center;
+}
+
+.gate {
+  display: grid;
+  gap: 12px;
+}
+
+.gate-icon {
+  justify-self: center;
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff7df;
+  background: linear-gradient(135deg, #8b4b23, #e2ac46);
+  box-shadow: 0 16px 30px -16px rgba(86, 46, 17, 0.7);
+}
+
+.gate h3 {
+  margin-top: 4px;
+  font-size: 22px;
+  color: #4b2b12;
+}
+
+.gate-text {
+  color: #6d4a2d;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.gate-input {
+  width: 100%;
+  padding: 13px 14px;
+  font-size: 16px; /* 16px keeps phones from zooming in on focus */
+  text-align: center;
+  letter-spacing: 1px;
+  color: #4f2f18;
+  background: rgba(255, 252, 244, 0.95);
+  border: 1px solid rgba(137, 83, 43, 0.4);
+  border-radius: 14px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.gate-input:focus {
+  border-color: #c2742f;
+  box-shadow: 0 0 0 4px rgba(226, 172, 70, 0.3);
+}
+
+.gate-error {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #8a2a12;
+  background: #fff1ec;
+  border: 1px solid rgba(181, 54, 36, 0.35);
+  border-radius: 10px;
+}
+
+.gate-submit {
+  width: 100%;
+  padding: 13px 16px;
+  font-size: 15px;
+}
+
+.gate-back {
+  padding: 4px;
+  font-size: 13px;
+  color: #7a5535;
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.gate-back:hover {
+  color: #4b2b12;
+}

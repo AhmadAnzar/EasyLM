@@ -4,7 +4,7 @@ const EXIT_MS = 220
 
 // A dialog that fades/scales in and out instead of popping in and out of existence.
 // Keep it rendered and drive it with `open`; it stays in the DOM just long enough to animate out.
-function Modal({ open, onClose, children, className = '', dismissible = true, onTop = false, label }) {
+function Modal({ open, onClose, children, className = '', overlayClassName = '', dismissible = true, onTop = false, label }) {
   const [mounted, setMounted] = useState(open)
   const [entered, setEntered] = useState(false)
 
@@ -45,7 +45,7 @@ function Modal({ open, onClose, children, className = '', dismissible = true, on
 
   return (
     <div
-      className={`modal-overlay ${isShown ? 'is-open' : ''} ${onTop ? 'on-top' : ''}`}
+      className={`modal-overlay ${isShown ? 'is-open' : ''} ${onTop ? 'on-top' : ''} ${overlayClassName}`}
       role="dialog"
       aria-modal="true"
       aria-label={label}

@@ -47,7 +47,8 @@ Copy `.env.example` to `.env` and fill in these values (the backend loads `backe
 
 - GROQ_API_KEY
 - GROQ_MODEL, optional, defaults to `openai/gpt-oss-120b`
-- APP_ACCESS_KEY and CORS_ORIGINS, optional: see "Access control" below. Leave them out for local development
+- SESSION_SECRET, optional locally but required on a deployed backend: signs login sessions (see "Accounts and workspaces" below)
+- CORS_ORIGINS, optional: the browser origins allowed to call the API. Leave it out for local development
 - EMBEDDING_PROVIDER, optional: `local` (default) or `voyage`. With `voyage`, also set VOYAGE_API_KEY. Voyage's free tier allows about one batch of chunks per minute, so large files are very slow
 - LOCAL_EMBEDDING_MODEL, optional, defaults to `sentence-transformers/all-MiniLM-L6-v2` (fast). `BAAI/bge-small-en-v1.5` is a slower alternative
 - QDRANT_URL and QDRANT_API_KEY, optional. Leave them out, or set QDRANT_URL to `local`, to use local storage. If the cloud cluster cannot be reached, the backend falls back to local storage and logs a warning
@@ -77,8 +78,8 @@ The frontend runs on port 5173 (Vite uses the next free port if that one is take
 
 ## How to use the app
 
-1. Open the frontend in your browser.
-2. Add a source: drop a PDF or CSV anywhere on the page, use Add Sources, or paste text (up to 5 sources at once).
+1. Open the frontend in your browser. Press "Try the live demo" to ask questions about a bundled sample document straight away, no account needed, or log in / create an account to use your own workspaces.
+2. In your own workspace, add a source: drop a PDF or CSV anywhere on the page, use Add Sources, or paste text (up to 5 sources at once).
 3. Wait for the content to be processed and indexed. The dialog shows the real progress and you can cancel.
 4. Ask a question about the uploaded content. Follow-up questions work because the recent conversation is sent along.
 5. Read the answer and check the source citations.
@@ -91,23 +92,39 @@ The frontend is a static Vite app and the backend a FastAPI server, so they can 
 - Backend (Render): start command `uvicorn main:app --host 0.0.0.0 --port $PORT`, Python 3.11, and these environment variables:
   - `GROQ_API_KEY` (required for answers) and optionally `GROQ_MODEL`
   - `QDRANT_URL`, `QDRANT_API_KEY` and `QDRANT_COLLECTION`
-  - `APP_ACCESS_KEY`: the access code (see below)
+  - `SESSION_SECRET`: a long random string (for example `python -c "import secrets; print(secrets.token_urlsafe(48))"`). Without it logins are forgotten on every restart
   - `CORS_ORIGINS`: the frontend's URL, for example `https://your-app.vercel.app`
   - No embedding key is needed. `VOYAGE_API_KEY` and `GITHUB_TOKEN` are no longer used.
-- The free Render tier sleeps when idle, so the first request afterwards is slow while the embedding model reloads.
+- The free Render tier sleeps when idle, so the first request afterwards is slow while the embedding model reloads. The app tells visitors when it is waking the server and pings it as soon as the site opens.
+- `frontend/vercel.json` rewrites every path to `index.html` so links such as `/demo` and `/u/name/workspace/1` work on refresh.
 
-### Access control
+### Accounts and workspaces
 
-Without `APP_ACCESS_KEY` anyone who knows the backend URL can read, upload, delete or clear your data. Set it and every data endpoint requires the code (the `X-Access-Key` header); the app then shows an unlock screen and remembers the code on that device (the Lock button forgets it). Ten wrong guesses lock a visitor out for ten minutes. `GET /auth/status` stays public so the app knows whether to ask. The code is deliberately typed in rather than built into the frontend, because anything in a frontend build is visible to every visitor.
+Nobody needs an account to see the app. Visitors can:
+
+- **Browse as a guest**: opens the read-only `/demo` workspace. The backend indexes the PDFs in `backend/demo/` at startup, so guests can ask questions immediately. They cannot upload, delete or clear anything.
+- **Create an account** (username and password, 8+ characters): each user gets private workspaces (up to 5, `MAX_WORKSPACES_PER_USER`) with their own links, such as `/u/yourname/workspace/1`. Only the owner can open a workspace, and the upload, delete and clear controls exist only there. Deleting or clearing only ever touches that one workspace's documents.
+
+Passwords are hashed with scrypt. Sessions are signed, stateless tokens (30 days) sent in the `Authorization` header. Users are stored in a small Qdrant collection (`USERS_COLLECTION`, default `easylm_users`), so they survive restarts. Every document point carries a `workspace` field and every search, listing and delete is filtered by it.
+
+To change the demo document edit `backend/demo/make_demo_pdf.py` (needs `pip install reportlab`) and run it, or drop any PDF into `backend/demo/`.
+
+### Rate limits
+
+The limits protect the free hosting and the free LLM quota. They are per process and kept in memory: guests can ask 10 questions a minute and 60 an hour per IP, logged-in users 20 and 200, and the whole demo 40 a minute. Uploads are limited to 10 an hour per user (files up to 25 MB, text up to 200000 characters), logins to 10 per 10 minutes and sign-ups to 5 per hour per IP. Exceeding a limit returns HTTP 429 with a `Retry-After` header and a plain-language message.
 
 ## Backend API
 
-- `POST /upload` and `POST /upload-text` index a file or some text (an optional `job_id` lets the client follow progress)
-- `GET /progress/{job_id}` and `POST /cancel/{job_id}` report on and stop an upload in progress
-- `POST /query` answers a question (optionally with the recent chat `history`)
-- `GET /sources` lists what is indexed, with the chunk count per source
-- `GET /auth/status` (public) says whether an access code is required, and `GET /auth/check` verifies one
-- `POST /delete-source` removes one source and `POST /clear` removes everything
+Everything that reads or writes documents takes a `workspace` (`demo` or `<username>:<n>`; it defaults to `demo`).
+
+- `POST /auth/register`, `POST /auth/login` and `GET /auth/me`: accounts and sessions
+- `GET /workspaces` and `POST /workspaces`: list and create the logged-in user's workspaces
+- `POST /query` answers a question (optionally with the recent chat `history`); open to guests for the demo
+- `GET /sources` lists what is indexed in a workspace, with the chunk count per source; open to guests for the demo
+- `GET /demo/file/{name}` serves the demo PDF for preview
+- `POST /upload` and `POST /upload-text` index a file or some text (an optional `job_id` lets the client follow progress); owner only
+- `GET /progress/{job_id}` and `POST /cancel/{job_id}` report on and stop an upload in progress; logged-in users only
+- `POST /delete-source` removes one source and `POST /clear` removes everything in the owner's workspace
 
 ## Supported input
 

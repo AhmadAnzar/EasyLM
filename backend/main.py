@@ -146,7 +146,22 @@ if EMBEDDING_PROVIDER not in {"local", "voyage"}:
     EMBEDDING_PROVIDER = "local"
 # all-MiniLM-L6-v2 is ~2-3x faster than bge-small-en-v1.5 (set LOCAL_EMBEDDING_MODEL to switch back).
 # On a 170-page PDF with 8 test questions both found the right passage equally often.
-LOCAL_EMBEDDING_MODEL = os.environ.get("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+_DEFAULT_LOCAL_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+LOCAL_EMBEDDING_MODEL = os.environ.get("LOCAL_EMBEDDING_MODEL", "").strip()
+if not LOCAL_EMBEDDING_MODEL:
+    LOCAL_EMBEDDING_MODEL = _DEFAULT_LOCAL_MODEL
+    # Older setups named this variable EMBEDDING_MODEL: honour it when fastembed can actually load that model.
+    _legacy_model = os.environ.get("EMBEDDING_MODEL", "").strip()
+    if _legacy_model and _legacy_model != _DEFAULT_LOCAL_MODEL:
+        try:
+            from fastembed import TextEmbedding as _TextEmbedding
+
+            if _legacy_model in {m["model"] for m in _TextEmbedding.list_supported_models()}:
+                LOCAL_EMBEDDING_MODEL = _legacy_model
+            else:
+                print(f"Notice: EMBEDDING_MODEL '{_legacy_model}' is not a model fastembed supports; using {_DEFAULT_LOCAL_MODEL}.")
+        except Exception as e:
+            print(f"Notice: could not check EMBEDDING_MODEL ({e}); using {_DEFAULT_LOCAL_MODEL}.")
 MODEL_CACHE_DIR = os.environ.get(
     "FASTEMBED_CACHE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".model_cache")
 )

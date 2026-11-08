@@ -6,7 +6,7 @@ import Modal from './Modal'
 import { API_BASE, apiFetch, authHeaders, errorMessage, notifyUnauthorized } from '../api'
 import { useAuth } from '../auth/authContext'
 import { getFile, putFile, removeFile } from '../fileStore'
-import { findBySegment, segmentFor, useGo, workspaceUrl } from '../nav'
+import { findWithOldNames, rememberOldName, segmentFor, useGo, workspaceItems, workspaceUrl } from '../nav'
 
 const STORAGE_PREFIX = 'easylm:v2'
 const LEGACY_PREFIX = 'easylm:v1' // one chat per workspace, before chats existed
@@ -142,7 +142,7 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
   const [sources, setSources] = useState(initialState.sources)
   const [chats, setChats] = useState(initialState.chats)
   // The link says which chat is open; an unknown or missing one falls back to the last one used.
-  const resolvedChat = findBySegment(chatItems(chats), chatSegment)
+  const resolvedChat = findWithOldNames(chatItems(chats), chatSegment, `chat:${workspaceId}`)
   const fallbackChat = chats.find((c) => c.id === initialState.active) || chats[chats.length - 1]
   const activeChat = chats.find((c) => c.id === resolvedChat?.id) || fallbackChat
   const messages = activeChat.messages
@@ -182,6 +182,10 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
   const [toast, setToast] = useState({ open: false, text: '', kind: 'error' })
   const toastTimerRef = useRef(null)
   const [demoLoading, setDemoLoading] = useState(readOnly) // the demo document is being indexed on the server
+  // After switching workspaces the panels show a spinner until the list has loaded (at least a moment,
+  // at most a few seconds), instead of sliding in.
+  const [switchMinDone, setSwitchMinDone] = useState(!switched)
+  const [switchSynced, setSwitchSynced] = useState(!switched)
   const [serverWaking, setServerWaking] = useState(false) // the free host is starting up after being idle
   const [previewModal, setPreviewModal] = useState({ open: false, url: '', name: '' })
   const [citationModal, setCitationModal] = useState({ open: false, number: 1, text: '', source: '', page: null, row: null })
@@ -331,8 +335,19 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
     } finally {
       clearTimeout(wakingTimer)
       setServerWaking(false)
+      setSwitchSynced(true)
     }
   }
+
+  useEffect(() => {
+    if (!switched) return undefined
+    const minimum = setTimeout(() => setSwitchMinDone(true), 500)
+    const giveUp = setTimeout(() => setSwitchSynced(true), 3500)
+    return () => {
+      clearTimeout(minimum)
+      clearTimeout(giveUp)
+    }
+  }, [switched])
 
   // Make the source list match the database as soon as the workspace opens.
   useEffect(() => {
@@ -969,11 +984,12 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
       ? `/demo/chats/${chatSegmentOf(chat, list)}`
       : workspaceUrl(user.username, workspace, workspaces, chatSegmentOf(chat, list))
 
-  // A link without a valid chat is rewritten to the chat that is actually shown.
+  // A link without a valid chat, or with an old name for it, is rewritten to the chat that is shown.
+  const canonicalChatSegment = chatSegmentOf(activeChat, chats)
   useEffect(() => {
-    if (!resolvedChat) navigate(chatUrl(activeChat), { replace: true })
+    if (String(chatSegment || '').toLowerCase() !== canonicalChatSegment) navigate(chatUrl(activeChat), { replace: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedChat?.id, chatSegment])
+  }, [chatSegment, canonicalChatSegment])
 
   const selectChat = (id) => {
     const chat = chats.find((c) => c.id === id)
@@ -1030,6 +1046,8 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
       return
     }
     if (renameModal.kind === 'chat') {
+      const before = chats.find((c) => c.id === renameModal.id)
+      if (before?.custom) rememberOldName(`chat:${workspaceId}`, chatSegmentOf(before, chats), before.id)
       const renamed = chats.map((c) => (c.id === renameModal.id ? { ...c, name: value.slice(0, 40), custom: true } : c))
       setChats(renamed)
       closeRename()
@@ -1041,6 +1059,10 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
     }
     setRenameModal((prev) => ({ ...prev, busy: true, error: '' }))
     try {
+      // remember the current link name first, so it still works while and after the rename happens
+      const items = workspaceItems(user.workspaces)
+      const oldSegment = segmentFor(items.find((i) => i.id === workspaceNumber), items)
+      if (oldSegment !== String(workspaceNumber)) rememberOldName(`ws:${user.username}`, oldSegment, workspaceNumber)
       const updated = await renameWorkspace(workspaceNumber, value)
       closeRename()
       const all = user.workspaces.map((w) => (w.n === updated.n ? updated : w))
@@ -1094,6 +1116,7 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
         onPreviewSource={openPreviewModal}
         onRemoveSource={requestDeleteSource}
         isDragging={isDragging}
+        loading={!(switchMinDone && switchSynced)}
         readOnly={readOnly}
         user={user}
         workspaceId={workspaceId}

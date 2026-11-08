@@ -155,6 +155,7 @@ function HomePage({
   onPreviewSource,
   onRemoveSource,
   isDragging,
+  loading = false,
   readOnly = false,
   user = null,
   workspaceId,
@@ -253,7 +254,13 @@ function HomePage({
         </div>
       </header>
 
-      <div className="app-grid">
+      <div className={`app-grid ${loading ? 'is-loading' : ''}`} aria-busy={loading}>
+        {loading && (
+          <div className="grid-loading" role="status">
+            <span className="load-ring" aria-hidden="true"></span>
+            <span>Loading workspace...</span>
+          </div>
+        )}
         <div className="side-col">
         <aside className={`source-summary ${isDragging ? 'drop-zone' : ''}`}>
           <div className="section-head">

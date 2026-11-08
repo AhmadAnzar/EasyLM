@@ -73,3 +73,34 @@ export function workspaceUrl(username, workspace, workspaces, chatSegment) {
   const base = `/u/${username}/workspace/${segmentFor(item, items)}`
   return chatSegment ? `${base}/chats/${chatSegment}` : base
 }
+
+// ---- Old names -----------------------------------------------------------------------------------
+// After a rename, bookmarks and browser history still hold the old name. Each old name is remembered
+// (in this browser) so such a link still opens the right workspace or chat, and is then rewritten to
+// the current name. scope is e.g. "ws:jane" or "chat:jane:1".
+
+const aliasKey = (scope) => `easylm:alias:${scope}`
+
+function readAliases(scope) {
+  try {
+    return JSON.parse(localStorage.getItem(aliasKey(scope)) || '{}') || {}
+  } catch {
+    return {}
+  }
+}
+
+export function rememberOldName(scope, segment, id) {
+  if (!segment) return
+  try {
+    localStorage.setItem(aliasKey(scope), JSON.stringify({ ...readAliases(scope), [String(segment).toLowerCase()]: id }))
+  } catch {
+    // storage unavailable: old links then simply fall back to the default workspace or chat
+  }
+}
+
+export function findWithOldNames(items, segment, scope) {
+  const found = findBySegment(items, segment)
+  if (found || segment == null) return found
+  const id = readAliases(scope)[String(segment).toLowerCase()]
+  return id == null ? undefined : items.find((item) => String(item.id) === String(id))
+}

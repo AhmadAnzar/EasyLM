@@ -1,12 +1,12 @@
 import { useEffect } from 'react'
-import { Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import './App.css'
 import LandingPage from './components/LandingPage'
 import LoginPage from './components/LoginPage'
 import Workspace from './components/Workspace'
 import { warmUpBackend } from './api'
 import { useAuth } from './auth/authContext'
-import { findBySegment, useGo, useViewTransitionFallback, workspaceItems, workspaceUrl } from './nav'
+import { findWithOldNames, segmentFor, useGo, useViewTransitionFallback, workspaceItems, workspaceUrl } from './nav'
 
 const SITE_NAME = 'EasyLM'
 
@@ -30,12 +30,20 @@ function DemoWorkspace() {
 function UserWorkspace() {
   const { user } = useAuth()
   const params = useParams()
+  const location = useLocation()
   const { username, ws } = params
   if (!user) return <Navigate to="/login" replace />
   if (user.username !== username.toLowerCase()) return <Navigate to={homePath(user)} replace />
-  // the link may name the workspace by its id or by its custom name
-  const found = findBySegment(workspaceItems(user.workspaces), ws)
+  // the link may name the workspace by its id, its custom name, or a name it used to have
+  const items = workspaceItems(user.workspaces)
+  const found = findWithOldNames(items, ws, `ws:${user.username}`)
   if (!found) return <Navigate to={homePath(user)} replace />
+  // ...and is rewritten to the current name, keeping the chat part of the link
+  if (segmentFor(found, items) !== ws.toLowerCase()) {
+    const workspace = user.workspaces.find((w) => w.n === found.id)
+    const tail = params['*'] ? `/${params['*']}` : ''
+    return <Navigate to={`${workspaceUrl(user.username, workspace, user.workspaces)}${tail}${location.search}`} replace state={location.state} />
+  }
   const workspaceId = `${user.username}:${found.id}`
   // `key` gives every workspace its own fresh state (chat, sources, uploads)
   return <Workspace key={workspaceId} workspaceId={workspaceId} readOnly={false} chatSegment={chatFromTail(params)} />

@@ -22,8 +22,12 @@ backend at `http://localhost:8000`. To use another backend, copy `.env.example` 
 
 ## What lives where
 
-- `src/App.jsx` holds the app state: sources, chat, uploads, drag and drop
-- `src/components/` has the landing page, the workspace, the Add Sources dialog and the animated `Modal`
+- `src/App.jsx` is the router: `/` landing page, `/login`, `/demo` (read-only guest workspace) and
+  `/u/:username/workspace/:n` (a logged-in user's own workspace)
+- `src/components/Workspace.jsx` holds one workspace's state: sources, chat, uploads, drag and drop
+- `src/components/` also has the landing page, the login page, the page layout (`HomePage`), the Add Sources dialog and the animated `Modal`
+- `src/auth/` keeps who is logged in; `src/api.js` sends the session token and turns server errors into messages
 - `src/fileStore.js` keeps uploaded PDFs in the browser (IndexedDB) so previews survive a refresh
-- The chat and the source list are saved in `localStorage`, and on load the source list is synced with
-  what is actually indexed in the database
+- The chat and the source list are saved in `localStorage` per workspace, and on load the source list is
+  synced with what is actually indexed in the database
+- `vercel.json` rewrites every path to `index.html` so deep links work on refresh

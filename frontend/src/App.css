@@ -1943,6 +1943,18 @@ html.no-vt .app > .workspace {
   background: rgba(220, 244, 233, 0.85);
 }
 
+.ws-block {
+  display: grid;
+  gap: 4px;
+}
+
+.ws-hint {
+  max-width: 300px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #7a5535;
+}
+
 .ws-switcher {
   display: flex;
   align-items: center;

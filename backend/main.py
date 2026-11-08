@@ -212,6 +212,14 @@ async def list_workspaces(request: Request):
     return {"workspaces": record.get("workspaces", [])}
 
 
+def _workspace_is_empty(workspace: str) -> bool:
+    client = _get_qdrant_client()
+    if not client.collection_exists(collection_name=QDRANT_COLLECTION):
+        return True
+    _ensure_indexes(client)
+    return client.count(collection_name=QDRANT_COLLECTION, count_filter=_workspace_filter(workspace), exact=True).count == 0
+
+
 @app.post("/workspaces")
 async def create_workspace(request: Request):
     username = await run_in_threadpool(require_user, request)
@@ -221,6 +229,13 @@ async def create_workspace(request: Request):
         existing = (user_store.get(username) or {}).get("workspaces", [])
         if len(existing) >= MAX_WORKSPACES_PER_USER:
             raise HTTPException(status_code=400, detail=f"You can have up to {MAX_WORKSPACES_PER_USER} workspaces.")
+        # one empty workspace at a time: finish filling it before making another
+        for workspace in existing:
+            if _workspace_is_empty(f"{username}:{workspace['n']}"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"\"{workspace['name']}\" is still empty. Add a source to it before creating another workspace.",
+                )
         number = max([w["n"] for w in existing], default=0) + 1
         updated = existing + [{"n": number, "name": f"Workspace {number}"}]
         user_store.set_workspaces(username, updated)

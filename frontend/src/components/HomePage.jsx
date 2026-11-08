@@ -136,6 +136,7 @@ function HomePage({
             <span className="ws-chip demo">Live demo · read-only</span>
           ) : (
             user && (
+              <div className="ws-block">
               <div className="ws-switcher">
                 <select
                   className="ws-select"
@@ -150,9 +151,17 @@ function HomePage({
                     </option>
                   ))}
                 </select>
-                <button className="ws-new" onClick={onNewWorkspace} disabled={isBusy || user.workspaces.length >= 5} title="Create another workspace">
+                <button className="ws-new" onClick={onNewWorkspace} disabled={isBusy || !hasSource || user.workspaces.length >= 5} title="Create another workspace">
                   + New
                 </button>
+              </div>
+              {(!hasSource || user.workspaces.length >= 5) && (
+                <p className="ws-hint">
+                  {user.workspaces.length >= 5
+                    ? 'You have reached the limit of 5 workspaces.'
+                    : 'This workspace is empty. Add a source before creating another one.'}
+                </p>
+              )}
               </div>
             )
           )}

@@ -1,4 +1,5 @@
 import os
+import re
 import csv
 import logging
 import shutil
@@ -137,6 +138,52 @@ def _voyage_api_request(payload: dict, job_id=None, remaining_batches: int = 1):
         return resp.json()
 
 
+# Embeddings come from a local ONNX model by default (free, no API key, no rate limits).
+# Set EMBEDDING_PROVIDER=voyage to use Voyage AI instead (needs VOYAGE_API_KEY).
+EMBEDDING_PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "local").strip().lower()
+if EMBEDDING_PROVIDER not in {"local", "voyage"}:
+    print(f"Warning: unknown EMBEDDING_PROVIDER '{EMBEDDING_PROVIDER}', using 'local'.")
+    EMBEDDING_PROVIDER = "local"
+# all-MiniLM-L6-v2 is ~2-3x faster than bge-small-en-v1.5 (set LOCAL_EMBEDDING_MODEL to switch back).
+# On a 170-page PDF with 8 test questions both found the right passage equally often.
+LOCAL_EMBEDDING_MODEL = os.environ.get("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MODEL_CACHE_DIR = os.environ.get(
+    "FASTEMBED_CACHE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".model_cache")
+)
+
+# Leave some cores free for the browser and the rest of the machine while embedding.
+EMBEDDING_THREADS = int(os.environ.get("EMBEDDING_THREADS", max(1, (os.cpu_count() or 4) // 2)))
+
+_local_model = None
+_local_model_lock = threading.Lock()
+
+
+def _get_local_model(job_id=None):
+    global _local_model
+    with _local_model_lock:
+        if _local_model is None:
+            _set_progress(job_id, note="Loading the embedding model (first run downloads ~100 MB)...")
+            from fastembed import TextEmbedding
+
+            _local_model = TextEmbedding(
+                model_name=LOCAL_EMBEDDING_MODEL, cache_dir=MODEL_CACHE_DIR, threads=EMBEDDING_THREADS
+            )
+            _set_progress(job_id, note="")
+    return _local_model
+
+
+def _lower_process_priority():
+    """Run below normal priority (Windows) so heavy embedding work never starves the browser."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception as e:
+        print(f"Notice: could not lower process priority ({e}).")
 
 
 @app.on_event("startup")
@@ -148,9 +195,12 @@ def _startup_checks():
 
 
 def get_embedding(text: str):
-    """Return a single embedding vector for `text` using Voyage AI."""
+    """Return a single embedding vector for a search query."""
     if isinstance(text, (list, tuple)):
         raise ValueError("get_embedding expects a single string. Use get_embeddings_batch for lists.")
+    if EMBEDDING_PROVIDER == "local":
+        vector = next(iter(_get_local_model().query_embed(text)))
+        return [float(x) for x in vector]
     payload = {"model": "voyage-2", "input": text}
     data = _voyage_api_request(payload)
 
@@ -173,16 +223,28 @@ def get_embeddings_batch(texts: list[str], job_id=None):
     if not texts:
         return []
 
-    batch_size = 32
+    # Small local batches keep progress updates frequent and cancel responsive.
+    batch_size = 16 if EMBEDDING_PROVIDER == "local" else 32
     all_embeddings = []
     total_batches = -(-len(texts) // batch_size)
+    _set_progress(job_id, stage="embedding", done=0, total=total_batches)
+
+    if EMBEDDING_PROVIDER == "local":
+        model = _get_local_model(job_id)
+        for i in range(0, len(texts), batch_size):
+            if _is_cancelled(job_id):
+                raise JobCancelled()
+            batch = texts[i : i + batch_size]
+            all_embeddings.extend([float(x) for x in vec] for vec in model.embed(batch, batch_size=batch_size))
+            _set_progress(job_id, done=i // batch_size + 1)
+        return all_embeddings
 
     for i in range(0, len(texts), batch_size):
         if _is_cancelled(job_id):
             raise JobCancelled()
         batch_number = i // batch_size + 1
         batch = texts[i : i + batch_size]
-        print(f"Requesting embeddings for batch {i // batch_size + 1}/{total_batches}...")
+        print(f"Requesting embeddings for batch {batch_number}/{total_batches}...")
         payload = {"model": "voyage-2", "input": batch}
         data = _voyage_api_request(payload, job_id=job_id, remaining_batches=total_batches - batch_number + 1)
         _set_progress(job_id, done=batch_number)
@@ -218,7 +280,13 @@ def _get_llm():
         )
     return llm
 
-QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "easy_lm_docs")
+_base_collection = os.environ.get("QDRANT_COLLECTION", "easy_lm_docs")
+if EMBEDDING_PROVIDER == "voyage":
+    QDRANT_COLLECTION = _base_collection
+else:
+    # Vectors from different embedding models are not comparable (and differ in size),
+    # so each local model gets its own collection instead of colliding with Voyage data.
+    QDRANT_COLLECTION = f"{_base_collection}_{re.sub(r'[^a-z0-9]+', '-', LOCAL_EMBEDDING_MODEL.lower()).strip('-')}"
 TOP_K = 2
 
 qdrant_client = None
@@ -321,9 +389,10 @@ def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
     client = _get_qdrant_client()
 
     chunk_texts = [doc.page_content for doc in chunks]
-    print("Requesting embeddings from Voyage AI...")
-    chunk_vectors = get_embeddings_batch(chunk_texts)
-    print("Embeddings received from Voyage AI.")
+    print(f"Embedding {len(chunk_texts)} chunks ({EMBEDDING_PROVIDER})...")
+    chunk_vectors = get_embeddings_batch(chunk_texts, job_id=job_id)
+    print("Embeddings ready.")
+    _set_progress(job_id, stage="storing", note="")
 
     # ensure collection exists with correct vector size
     vector_size = len(chunk_vectors[0]) if chunk_vectors else 0

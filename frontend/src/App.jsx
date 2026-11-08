@@ -132,6 +132,10 @@ function App() {
     }
   }, [messages, sources])
 
+  useEffect(() => {
+    document.title = onHomePage ? `${siteName} · Workspace` : `${siteName} · Ask your documents`
+  }, [onHomePage])
+
   // Cross-fade between pages with the View Transitions API where the browser has it.
   const supportsViewTransitions = typeof document !== 'undefined' && 'startViewTransition' in document
   useEffect(() => {

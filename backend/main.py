@@ -25,7 +25,7 @@ from prompts import CONDENSE_QUESTION_PROMPT, RAG_SYSTEM_PROMPT
 # pypdf logs a warning per damaged object in some PDFs; thousands of lines slow the server down.
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
-app = FastAPI(title="Assignment 03 - RAG")
+app = FastAPI(title="EasyLM API")
 
 app.add_middleware(
     CORSMiddleware,

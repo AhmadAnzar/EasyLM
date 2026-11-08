@@ -18,7 +18,7 @@ function LandingPage({ siteName, onOpenApp }) {
             <h2 className="hero-subtitle">Ask better questions. Get grounded answers.</h2>
             <p className="landing-copy">
               A focused RAG workspace that keeps your source workflow simple:
-              paste clipboard text or upload one file.
+              paste text or upload PDF and CSV files, then ask questions about them.
             </p>
             <div className="landing-points">
               <span>Fast setup</span>

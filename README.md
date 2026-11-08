@@ -47,6 +47,7 @@ Copy `.env.example` to `.env` and fill in these values (the backend loads `backe
 
 - GROQ_API_KEY
 - GROQ_MODEL, optional, defaults to `openai/gpt-oss-120b`
+- APP_ACCESS_KEY and CORS_ORIGINS, optional: see "Access control" below. Leave them out for local development
 - EMBEDDING_PROVIDER, optional: `local` (default) or `voyage`. With `voyage`, also set VOYAGE_API_KEY. Voyage's free tier allows about one batch of chunks per minute, so large files are very slow
 - LOCAL_EMBEDDING_MODEL, optional, defaults to `sentence-transformers/all-MiniLM-L6-v2` (fast). `BAAI/bge-small-en-v1.5` is a slower alternative
 - QDRANT_URL and QDRANT_API_KEY, optional. Leave them out, or set QDRANT_URL to `local`, to use local storage. If the cloud cluster cannot be reached, the backend falls back to local storage and logs a warning
@@ -82,12 +83,30 @@ The frontend runs on port 5173 (Vite uses the next free port if that one is take
 4. Ask a question about the uploaded content. Follow-up questions work because the recent conversation is sent along.
 5. Read the answer and check the source citations.
 
+## Deploying (for example Vercel + Render)
+
+The frontend is a static Vite app and the backend a FastAPI server, so they can be hosted separately.
+
+- Frontend (Vercel): set `VITE_API_BASE_URL` to the backend's public URL.
+- Backend (Render): start command `uvicorn main:app --host 0.0.0.0 --port $PORT`, Python 3.11, and these environment variables:
+  - `GROQ_API_KEY` (required for answers) and optionally `GROQ_MODEL`
+  - `QDRANT_URL`, `QDRANT_API_KEY` and `QDRANT_COLLECTION`
+  - `APP_ACCESS_KEY`: the access code (see below)
+  - `CORS_ORIGINS`: the frontend's URL, for example `https://your-app.vercel.app`
+  - No embedding key is needed. `VOYAGE_API_KEY` and `GITHUB_TOKEN` are no longer used.
+- The free Render tier sleeps when idle, so the first request afterwards is slow while the embedding model reloads.
+
+### Access control
+
+Without `APP_ACCESS_KEY` anyone who knows the backend URL can read, upload, delete or clear your data. Set it and every data endpoint requires the code (the `X-Access-Key` header); the app then shows an unlock screen and remembers the code on that device (the Lock button forgets it). Ten wrong guesses lock a visitor out for ten minutes. `GET /auth/status` stays public so the app knows whether to ask. The code is deliberately typed in rather than built into the frontend, because anything in a frontend build is visible to every visitor.
+
 ## Backend API
 
 - `POST /upload` and `POST /upload-text` index a file or some text (an optional `job_id` lets the client follow progress)
 - `GET /progress/{job_id}` and `POST /cancel/{job_id}` report on and stop an upload in progress
 - `POST /query` answers a question (optionally with the recent chat `history`)
 - `GET /sources` lists what is indexed, with the chunk count per source
+- `GET /auth/status` (public) says whether an access code is required, and `GET /auth/check` verifies one
 - `POST /delete-source` removes one source and `POST /clear` removes everything
 
 ## Supported input

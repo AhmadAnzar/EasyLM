@@ -1,13 +1,36 @@
+"""Check that the Qdrant instance configured in backend/.env is reachable.
+
+Run from the backend folder:  python test_rest_direct.py
+"""
+import os
+
 from qdrant_client import QdrantClient
 
-url = "https://9b0fb569-58de-4672-80d8-2007ae05fc69.eu-central-1-0.aws.cloud.qdrant.io"
-# The first API key
-first_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3ViamVjdCI6ImFwaS1rZXk6ZTQ3NTMzMDctNDJiZi00ZDI0LWJiNzEtMzdiMDM4YTEzMDU5In0.xSewpJhauLAOw_V1izxZuIpKnVYYUZHHv-raRSUc2r4"
 
-print("Testing first key with URL:", url)
+def load_env(path=".env"):
+    values = {}
+    try:
+        with open(path, "r", encoding="utf-8") as env_file:
+            for line in env_file:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    return values
+
+
+env = load_env()
+url = os.environ.get("QDRANT_URL") or env.get("QDRANT_URL")
+api_key = os.environ.get("QDRANT_API_KEY") or env.get("QDRANT_API_KEY")
+
+if not url or url.lower() == "local":
+    raise SystemExit("QDRANT_URL is not set (or is 'local'), so there is no cloud cluster to test.")
+
+print("Testing connection to:", url)
 try:
-    client = QdrantClient(url=url, api_key=first_key)
-    collections = client.get_collections()
-    print("SUCCESS! collections:", collections)
+    client = QdrantClient(url=url, api_key=api_key, check_compatibility=False)
+    print("SUCCESS! collections:", client.get_collections())
 except Exception as e:
     print("FAILED:", type(e).__name__, str(e))

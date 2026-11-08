@@ -1679,26 +1679,10 @@ html.no-vt .app.is-switch > .workspace {
   animation: switchSweep 650ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
-/* The two panels wait, still and invisible, behind a spinner; nothing moves or slides. */
-.app-grid {
-  position: relative;
-}
-
-.app-grid > .side-col,
-.app-grid > .chat-box {
-  transition: opacity 240ms ease;
-}
-
-.app-grid.is-loading > .side-col,
-.app-grid.is-loading > .chat-box {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.grid-loading {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
+/* While another workspace loads, each panel keeps its frame and shows a spinner in place of its content. */
+.panel-loading {
+  flex: 1;
+  min-height: 120px;
   display: grid;
   place-content: center;
   justify-items: center;

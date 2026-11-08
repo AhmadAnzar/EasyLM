@@ -228,7 +228,7 @@ function HomePage({
         <div className="topbar-actions">
           {!readOnly && (
             <>
-              <button className="btn primary" onClick={onOpenModal} disabled={isBusy}>
+              <button className="btn primary" onClick={onOpenModal} disabled={isBusy || loading}>
                 Add Sources
               </button>
               <button className="btn" onClick={onClearSources} disabled={isBusy || !hasSource}>
@@ -254,13 +254,7 @@ function HomePage({
         </div>
       </header>
 
-      <div className={`app-grid ${loading ? 'is-loading' : ''}`} aria-busy={loading}>
-        {loading && (
-          <div className="grid-loading" role="status">
-            <span className="load-ring" aria-hidden="true"></span>
-            <span>Loading workspace...</span>
-          </div>
-        )}
+      <div className="app-grid" aria-busy={loading}>
         <div className="side-col">
         <aside className={`source-summary ${isDragging ? 'drop-zone' : ''}`}>
           <div className="section-head">
@@ -270,7 +264,12 @@ function HomePage({
             </span>
           </div>
 
-          {hasSource ? (
+          {loading ? (
+            <div className="panel-loading" role="status">
+              <span className="load-ring" aria-hidden="true"></span>
+              <span>Loading sources...</span>
+            </div>
+          ) : hasSource ? (
             <div className="source-list">
               {sources.map((source) => (
                 <SourceCard
@@ -340,37 +339,44 @@ function HomePage({
             </div>
           )}
 
-          <div className="messages" key={activeChatId} ref={messagesContainerRef} aria-live="polite">
-            {messages.map((msg, index) => (
-              <div key={msg.id || `${msg.role}-${index}`} className={`msg-row ${msg.role}`}>
-                {msg.role === 'user' ? (
-                  <span className="msg-avatar user" title={user ? user.username : 'Guest'} aria-hidden="true">
-                    {userInitial}
-                  </span>
-                ) : (
-                  <span className="msg-avatar bot" title="EasyLM" aria-hidden="true">
-                    <BotIcon />
-                  </span>
-                )}
-                <div className={`bubble ${msg.role} ${msg.variant || ''} ${msg.status === 'streaming' ? 'streaming' : ''}`}>
-                  {msg.status === 'typing' ? (
-                    <span className="typing-state" aria-label="Assistant is typing">
-                      <span className="typing-label">Thinking</span>
-                      <span className="typing-dots" aria-hidden="true">
-                        <i></i>
-                        <i></i>
-                        <i></i>
-                      </span>
+          {loading ? (
+            <div className="panel-loading" role="status">
+              <span className="load-ring" aria-hidden="true"></span>
+              <span>Loading chat...</span>
+            </div>
+          ) : (
+            <div className="messages" key={activeChatId} ref={messagesContainerRef} aria-live="polite">
+              {messages.map((msg, index) => (
+                <div key={msg.id || `${msg.role}-${index}`} className={`msg-row ${msg.role}`}>
+                  {msg.role === 'user' ? (
+                    <span className="msg-avatar user" title={user ? user.username : 'Guest'} aria-hidden="true">
+                      {userInitial}
                     </span>
                   ) : (
-                    <MessageWithCitations text={msg.text} citations={msg.citations || []} onOpenCitation={onOpenCitation} />
+                    <span className="msg-avatar bot" title="EasyLM" aria-hidden="true">
+                      <BotIcon />
+                    </span>
                   )}
+                  <div className={`bubble ${msg.role} ${msg.variant || ''} ${msg.status === 'streaming' ? 'streaming' : ''}`}>
+                    {msg.status === 'typing' ? (
+                      <span className="typing-state" aria-label="Assistant is typing">
+                        <span className="typing-label">Thinking</span>
+                        <span className="typing-dots" aria-hidden="true">
+                          <i></i>
+                          <i></i>
+                          <i></i>
+                        </span>
+                      </span>
+                    ) : (
+                      <MessageWithCitations text={msg.text} citations={msg.citations || []} onOpenCitation={onOpenCitation} />
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
 
-          {suggestions.length > 0 && (
+          {!loading && suggestions.length > 0 && (
             <div className="suggestions" aria-label="Suggested questions">
               {suggestions.map((question) => (
                 <button key={question} type="button" className="suggestion" disabled={isBusy} onClick={() => onSuggest(question)}>
@@ -386,7 +392,7 @@ function HomePage({
               onChange={(event) => onInputChange(event.target.value)}
               placeholder={hasSource || readOnly ? 'Ask a question about your sources' : 'Add a source to get started'}
               aria-label="Question input"
-              disabled={isBusy}
+              disabled={isBusy || loading}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault()
@@ -394,7 +400,7 @@ function HomePage({
                 }
               }}
             />
-            <button className="btn primary" onClick={onSend} disabled={isBusy}>
+            <button className="btn primary" onClick={onSend} disabled={isBusy || loading}>
               {isBusy ? busyLabel : 'Send'}
             </button>
           </div>

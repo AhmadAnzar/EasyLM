@@ -89,6 +89,7 @@ user_store = UserStore(lambda: _get_qdrant_client(), USERS_COLLECTION)
 MAX_WORKSPACES_PER_USER = int(os.environ.get("MAX_WORKSPACES_PER_USER", "5"))
 MAX_UPLOAD_MB = float(os.environ.get("MAX_UPLOAD_MB", "25"))
 MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", "200000"))
+MAX_SOURCES_PER_WORKSPACE = int(os.environ.get("MAX_SOURCES_PER_WORKSPACE", "5"))
 
 # Documents belong to a workspace. "demo" is the read-only workspace everyone (guests included) can ask
 # questions about; a user's own workspaces are called "<username>:<number>" and only that user can touch them.
@@ -825,6 +826,16 @@ def _index_demo_documents():
         _demo_state["loading"] = False
 
 
+def _check_source_limit(workspace: str, source_name: str):
+    """A workspace holds a few sources at a time. Re-adding a name replaces it, so that is always allowed."""
+    names = {s["name"] for s in _collect_sources(_get_qdrant_client(), workspace)}
+    if source_name not in names and len(names) >= MAX_SOURCES_PER_WORKSPACE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A workspace can hold up to {MAX_SOURCES_PER_WORKSPACE} sources. Remove one to add another.",
+        )
+
+
 async def _authorize(request: Request, workspace: str | None, write: bool) -> str:
     return await run_in_threadpool(authorize_workspace, request, workspace, write)
 
@@ -935,6 +946,7 @@ async def upload_file(
         normalized_suffix = suffix.lower()
         if normalized_suffix not in {".pdf", ".csv"}:
             raise HTTPException(status_code=400, detail="Only PDF and CSV files are supported.")
+        await run_in_threadpool(_check_source_limit, workspace, os.path.basename(file.filename or "") or "uploaded.file")
 
         _set_progress(job_id, stage="parsing")
         max_bytes = int(MAX_UPLOAD_MB * 1024 * 1024)
@@ -988,6 +1000,7 @@ async def upload_text(payload: TextUploadRequest, request: Request):
 
     job_id = payload.job_id
     source_name = (payload.source_name or "clipboard-text").strip()[:120] or "clipboard-text"
+    await run_in_threadpool(_check_source_limit, workspace, source_name)
     docs = [Document(page_content=text, metadata={"source": source_name})]
     try:
         total_chunks = await run_in_threadpool(_index_documents, docs, source_name=source_name, upload_type="text", job_id=job_id, workspace=workspace)

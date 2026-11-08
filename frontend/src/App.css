@@ -1664,18 +1664,17 @@ html.no-vt .app.is-switch > .workspace {
 
 .app.is-switch .topbar {
   position: relative;
-  overflow: hidden;
 }
 
 .app.is-switch .topbar::after {
   content: '';
   position: absolute;
-  left: 0;
+  left: 22px;
+  right: 22px;
   bottom: 0;
   height: 3px;
-  width: 40%;
-  border-radius: 3px;
-  background: linear-gradient(90deg, transparent, #c2742f, #e2ac46, transparent);
+  background: linear-gradient(90deg, transparent, #c2742f, #e2ac46, transparent) no-repeat;
+  background-size: 40% 100%;
   animation: switchSweep 650ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
@@ -1703,11 +1702,46 @@ html.no-vt .app.is-switch > .workspace {
 
 @keyframes switchSweep {
   from {
-    transform: translateX(-100%);
+    background-position: 0% 0;
   }
   to {
-    transform: translateX(260%);
+    background-position: 100% 0;
   }
+}
+
+/* "You can only add 5 sources": shown on hover or keyboard focus over the disabled button */
+.limit-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.limit-tip.is-limited button {
+  pointer-events: none; /* so the hover lands on the wrapper, which carries the tooltip */
+}
+
+.limit-tip.is-limited::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: #fff7df;
+  background: #4b2b12;
+  border-radius: 8px;
+  box-shadow: 0 10px 20px -10px rgba(40, 20, 8, 0.7);
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.limit-tip.is-limited:hover::after {
+  opacity: 1;
+  transform: none;
 }
 
 /* Landing page content settles in a beat after the page itself. */

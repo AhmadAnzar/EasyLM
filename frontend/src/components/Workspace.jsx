@@ -372,6 +372,10 @@ function Workspace({ workspaceId, readOnly, chatSegment }) {
       showToast('The demo is read-only. Log in to add your own documents.', 'info')
       return
     }
+    if (sources.length >= MAX_SOURCES) {
+      showToast(`You can only add ${MAX_SOURCES} sources. Remove one to add another.`)
+      return
+    }
     const files = Array.from(e.dataTransfer?.files || [])
 
     if (files.length > 1) {

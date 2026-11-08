@@ -20,6 +20,15 @@ function TrashIcon() {
   )
 }
 
+// A button that is off because the workspace is full explains why when hovered or focused.
+function LimitTip({ limited, tip, children }) {
+  return (
+    <span className={`limit-tip ${limited ? 'is-limited' : ''}`} data-tip={limited ? tip : undefined}>
+      {children}
+    </span>
+  )
+}
+
 function PencilIcon() {
   return (
     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -170,6 +179,8 @@ function HomePage({
   notice = ''
 }) {
   const userInitial = user ? user.username.charAt(0).toUpperCase() : 'G'
+  const atSourceLimit = !readOnly && sources.length >= maxSources
+  const limitTip = `You can only add ${maxSources} sources`
   const messagesContainerRef = useRef(null)
   const lastMessageCountRef = useRef(0)
 
@@ -228,9 +239,11 @@ function HomePage({
         <div className="topbar-actions">
           {!readOnly && (
             <>
-              <button className="btn primary" onClick={onOpenModal} disabled={isBusy || loading}>
-                Add Sources
-              </button>
+              <LimitTip limited={atSourceLimit} tip={limitTip}>
+                <button className="btn primary" onClick={onOpenModal} disabled={isBusy || loading || atSourceLimit}>
+                  Add Sources
+                </button>
+              </LimitTip>
               <button className="btn" onClick={onClearSources} disabled={isBusy || !hasSource}>
                 Clear Sources
               </button>
@@ -301,7 +314,9 @@ function HomePage({
           <div className="source-hint">
             {readOnly
               ? 'The demo is read-only. Log in to add and manage your own sources.'
-              : `You can keep up to ${maxSources} sources at the same time.`}
+              : atSourceLimit
+                ? `You have reached the limit of ${maxSources} sources. Remove one to add another.`
+                : `You can keep up to ${maxSources} sources at the same time.`}
           </div>
         </aside>
 
@@ -325,9 +340,11 @@ function HomePage({
                 New chat
               </button>
               {!readOnly && (
-                <button className="btn primary" onClick={onOpenModal} disabled={isBusy} style={{ padding: '6px 12px', fontSize: '12px' }}>
-                  + Add Source
-                </button>
+                <LimitTip limited={atSourceLimit} tip={limitTip}>
+                  <button className="btn primary" onClick={onOpenModal} disabled={isBusy || atSourceLimit} style={{ padding: '6px 12px', fontSize: '12px' }}>
+                    + Add Source
+                  </button>
+                </LimitTip>
               )}
             </div>
           </div>

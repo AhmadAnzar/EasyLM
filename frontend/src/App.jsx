@@ -6,23 +6,25 @@ import LoginPage from './components/LoginPage'
 import Workspace from './components/Workspace'
 import { warmUpBackend } from './api'
 import { useAuth } from './auth/authContext'
-import { useGo, useViewTransitionFallback, workspacePath } from './nav'
+import { findBySegment, useGo, useViewTransitionFallback, workspaceItems, workspaceUrl } from './nav'
 
 const SITE_NAME = 'EasyLM'
 
 // The first workspace of the logged-in user, or the demo for guests.
 function homePath(user) {
-  return user ? workspacePath(user.username, user.workspaces[0]?.n ?? 1) : '/demo'
+  return user ? workspaceUrl(user.username, user.workspaces[0] ?? { n: 1, name: 'Workspace 1' }, user.workspaces) : '/demo'
 }
 
-// /u/:username/workspace/:n - only the owner gets in; anyone else is sent somewhere sensible.
+// /u/:username/workspace/:ws - only the owner gets in; anyone else is sent somewhere sensible.
 function UserWorkspace() {
   const { user } = useAuth()
-  const { username, n } = useParams()
+  const { username, ws } = useParams()
   if (!user) return <Navigate to="/login" replace />
   if (user.username !== username.toLowerCase()) return <Navigate to={homePath(user)} replace />
-  if (!user.workspaces.some((w) => String(w.n) === n)) return <Navigate to={homePath(user)} replace />
-  const workspaceId = `${user.username}:${n}`
+  // the link may name the workspace by its id or by its custom name
+  const found = findBySegment(workspaceItems(user.workspaces), ws)
+  if (!found) return <Navigate to={homePath(user)} replace />
+  const workspaceId = `${user.username}:${found.id}`
   // `key` gives every workspace its own fresh state (chat, sources, uploads)
   return <Workspace key={workspaceId} workspaceId={workspaceId} readOnly={false} />
 }
@@ -57,7 +59,7 @@ function App() {
         element={user ? <Navigate to={homePath(user)} replace /> : <div className="app"><LoginPage siteName={SITE_NAME} /></div>}
       />
       <Route path="/demo" element={<Workspace key="demo" workspaceId="demo" readOnly />} />
-      <Route path="/u/:username/workspace/:n" element={<UserWorkspace />} />
+      <Route path="/u/:username/workspace/:ws" element={<UserWorkspace />} />
       <Route path="/home" element={<Navigate to={homePath(user)} replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

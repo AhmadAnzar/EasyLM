@@ -96,6 +96,7 @@ export const registerAccount = (username, password) => authRequest('/auth/regist
 export const loginAccount = (username, password) => authRequest('/auth/login', jsonPost({ username, password }))
 export const fetchMe = () => authRequest('/auth/me')
 export const createWorkspaceRequest = () => authRequest('/workspaces', { method: 'POST' })
+export const renameWorkspaceRequest = (n, name) => authRequest(`/workspaces/${n}/rename`, jsonPost({ name }))
 
 // Wake the (free, sleeping) backend as soon as the site opens so the first real request is quicker.
 export function warmUpBackend() {

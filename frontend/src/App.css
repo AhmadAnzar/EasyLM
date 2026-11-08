@@ -2026,6 +2026,48 @@ html.no-vt .app.is-switch > .workspace {
   cursor: pointer;
 }
 
+.ws-rename {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  color: #663717;
+  background: transparent;
+  border: 1px solid rgba(137, 83, 43, 0.35);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.ws-rename:hover:not(:disabled) {
+  background: rgba(255, 248, 228, 0.9);
+}
+
+.ws-rename:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.modal.rename-modal {
+  width: min(420px, 100%);
+}
+
+.rename-input {
+  width: 100%;
+  margin: 12px 0;
+  padding: 12px 14px;
+  font-size: 16px;
+  color: #4f2f18;
+  background: rgba(255, 252, 244, 0.95);
+  border: 1px solid rgba(137, 83, 43, 0.4);
+  border-radius: 12px;
+  outline: none;
+}
+
+.rename-input:focus {
+  border-color: #c2742f;
+  box-shadow: 0 0 0 4px rgba(226, 172, 70, 0.3);
+}
+
 .ws-new {
   padding: 5px 10px;
   font-size: 13px;

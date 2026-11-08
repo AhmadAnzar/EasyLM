@@ -212,6 +212,29 @@ async def list_workspaces(request: Request):
     return {"workspaces": record.get("workspaces", [])}
 
 
+class RenameRequest(BaseModel):
+    name: str
+
+
+@app.post("/workspaces/{number}/rename")
+async def rename_workspace(number: int, req: RenameRequest, request: Request):
+    username = await run_in_threadpool(require_user, request)
+    limiter.check(f"rename:{username}", 30, 3600, "renames")
+    name = " ".join(req.name.split())  # trims and collapses runs of whitespace
+    if not 1 <= len(name) <= 40:
+        raise HTTPException(status_code=400, detail="A workspace name is 1 to 40 characters.")
+
+    def rename():
+        existing = (user_store.get(username) or {}).get("workspaces", [])
+        if not any(w["n"] == number for w in existing):
+            raise HTTPException(status_code=404, detail="Unknown workspace.")
+        updated = [{**w, "name": name} if w["n"] == number else w for w in existing]
+        user_store.set_workspaces(username, updated)
+        return updated
+
+    return {"workspaces": await run_in_threadpool(rename)}
+
+
 def _workspace_is_empty(workspace: str) -> bool:
     client = _get_qdrant_client()
     if not client.collection_exists(collection_name=QDRANT_COLLECTION):

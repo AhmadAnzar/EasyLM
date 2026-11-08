@@ -7,6 +7,7 @@ import {
   getToken,
   loginAccount,
   registerAccount,
+  renameWorkspaceRequest,
   saveSession
 } from '../api'
 import { AuthContext } from './authContext'
@@ -65,6 +66,13 @@ function AuthProvider({ children }) {
       login: async (username, password) => startSession(await loginAccount(username, password)),
       register: async (username, password) => startSession(await registerAccount(username, password)),
       logout,
+      renameWorkspace: async (n, name) => {
+        const { workspaces } = await renameWorkspaceRequest(n, name)
+        const next = { ...user, workspaces }
+        saveSession(getToken(), next)
+        setUser(next)
+        return workspaces.find((w) => w.n === n)
+      },
       addWorkspace: async () => {
         const { workspaces } = await createWorkspaceRequest()
         const next = { ...user, workspaces }

@@ -6,7 +6,7 @@ import Modal from './Modal'
 import { API_BASE, apiFetch, authHeaders, errorMessage, notifyUnauthorized } from '../api'
 import { useAuth } from '../auth/authContext'
 import { getFile, putFile, removeFile } from '../fileStore'
-import { useGo, workspacePath } from '../nav'
+import { useGo, workspaceUrl } from '../nav'
 
 const STORAGE_PREFIX = 'easylm:v1'
 const MAX_SOURCES = 5
@@ -95,7 +95,7 @@ function loadSavedState(storageKey, seed, keepSources) {
 // One workspace: its sources, its chat and everything around them. `readOnly` is the shared demo
 // workspace that guests use; otherwise this is one of the logged-in user's own workspaces.
 function Workspace({ workspaceId, readOnly }) {
-  const { user, logout, addWorkspace } = useAuth()
+  const { user, logout, addWorkspace, renameWorkspace } = useAuth()
   const go = useGo()
   const navigate = useNavigate()
   // Switching between workspaces keeps the page frame and only refreshes the panels (see the is-switch CSS).
@@ -893,12 +893,43 @@ function Workspace({ workspaceId, readOnly }) {
     }
   }
 
-  const switchWorkspace = (n) => navigate(workspacePath(user.username, n), { state: { switch: true } })
+  const workspaceNumber = Number(workspaceId.split(':')[1])
+  const currentWorkspace = user?.workspaces.find((w) => w.n === workspaceNumber)
+
+  const switchWorkspace = (n) => {
+    const target = user.workspaces.find((w) => w.n === n)
+    if (target) navigate(workspaceUrl(user.username, target, user.workspaces), { state: { switch: true } })
+  }
+
+  // ---- rename dialog (workspaces here; chats reuse it) ----
+  const [renameModal, setRenameModal] = useState({ open: false, value: '', error: '', busy: false })
+
+  const openRenameWorkspace = () =>
+    setRenameModal({ open: true, value: currentWorkspace?.name || '', error: '', busy: false })
+
+  const submitRename = async (event) => {
+    event.preventDefault()
+    const value = renameModal.value.trim()
+    if (!value) {
+      setRenameModal((prev) => ({ ...prev, error: 'Please enter a name.' }))
+      return
+    }
+    setRenameModal((prev) => ({ ...prev, busy: true, error: '' }))
+    try {
+      const updated = await renameWorkspace(workspaceNumber, value)
+      setRenameModal((prev) => ({ ...prev, open: false, busy: false }))
+      // the link uses the new name, so move to it without adding a history entry
+      const all = user.workspaces.map((w) => (w.n === updated.n ? updated : w))
+      navigate(workspaceUrl(user.username, updated, all), { replace: true })
+    } catch (err) {
+      setRenameModal((prev) => ({ ...prev, busy: false, error: err.message }))
+    }
+  }
 
   const createWorkspace = async () => {
     try {
       const created = await addWorkspace()
-      navigate(workspacePath(user.username, created.n), { state: { switch: true } })
+      navigate(workspaceUrl(user.username, created, [...user.workspaces, created]), { state: { switch: true } })
     } catch (err) {
       showToast(err.message)
     }
@@ -938,6 +969,7 @@ function Workspace({ workspaceId, readOnly }) {
         user={user}
         workspaceId={workspaceId}
         onSwitchWorkspace={switchWorkspace}
+        onRenameWorkspace={openRenameWorkspace}
         onNewWorkspace={createWorkspace}
         onLogout={leave}
         onLogin={() => go('/login')}
@@ -1006,6 +1038,33 @@ function Workspace({ workspaceId, readOnly }) {
       <div className={`top-progress ${uploadStage === 'uploading' && uploadProgress > 0 && uploadProgress < 100 ? 'visible' : ''}`}>
         <div className="top-progress-fill" style={{ width: `${uploadProgress}%` }} />
       </div>
+
+      {/* rename */}
+      <Modal open={renameModal.open} onClose={() => setRenameModal((prev) => ({ ...prev, open: false }))} className="rename-modal" label="Rename workspace">
+        <form onSubmit={submitRename}>
+          <div className="modal-head">
+            <h3>Rename workspace</h3>
+          </div>
+          <input
+            className="rename-input"
+            value={renameModal.value}
+            maxLength={40}
+            autoFocus
+            aria-label="Workspace name"
+            onChange={(event) => setRenameModal((prev) => ({ ...prev, value: event.target.value }))}
+            disabled={renameModal.busy}
+          />
+          {renameModal.error && <p className="auth-error" role="alert">{renameModal.error}</p>}
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={() => setRenameModal((prev) => ({ ...prev, open: false }))}>
+              Cancel
+            </button>
+            <button type="submit" className="btn primary" disabled={renameModal.busy}>
+              {renameModal.busy ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </form>
+      </Modal>
 
       {/* the passage a citation points to */}
       <Modal

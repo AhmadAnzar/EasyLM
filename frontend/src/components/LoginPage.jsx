@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAuth } from '../auth/authContext'
-import { useGo, workspacePath } from '../nav'
+import { useGo, workspaceUrl } from '../nav'
 
 const USERNAME_PATTERN = /^[a-z0-9][a-z0-9_-]{2,23}$/
 
@@ -39,7 +39,7 @@ function LoginPage({ siteName }) {
     dismissSessionNotice()
     try {
       const user = await (isSignup ? register : login)(name, password)
-      go(workspacePath(user.username, user.workspaces[0]?.n ?? 1))
+      go(workspaceUrl(user.username, user.workspaces[0] ?? { n: 1, name: 'Workspace 1' }, user.workspaces))
     } catch (err) {
       setError(err.message)
       setBusy(false)

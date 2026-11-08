@@ -1,9 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import './App.css'
 import AddSourcesModal from './components/AddSourcesModal'
 import HomePage from './components/HomePage'
 import LandingPage from './components/LandingPage'
+import Modal from './components/Modal'
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatTimeLeft(seconds) {
+  if (seconds < 8) return 'a few seconds'
+  if (seconds < 55) return `about ${Math.round(seconds / 5) * 5} s`
+  return `about ${Math.ceil(seconds / 60)} min`
+}
+
 
 function App() {
   const navigate = useNavigate()
@@ -25,7 +40,16 @@ function App() {
   const [input, setInput] = useState('')
   const [sourceMode, setSourceMode] = useState('text')
   const [uploadProgress, setUploadProgress] = useState(0)
-  const [uploadStage, setUploadStage] = useState('') // '', 'uploading', 'chunking', 'embedding', 'done'
+  const [uploadStage, setUploadStage] = useState('') // '', 'uploading', 'chunking', 'embedding', 'done', 'error'
+  const [embedPercent, setEmbedPercent] = useState(0)
+  const [uploadDetail, setUploadDetail] = useState('')
+  const [uploadError, setUploadError] = useState('')
+  const pollTimerRef = useRef(null)
+  const xhrRef = useRef(null)
+  const jobIdRef = useRef(null)
+  const abortRef = useRef(null)
+  const etaRef = useRef(null)
+  const cancelledRef = useRef(false)
   const [isBusy, setIsBusy] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [previewModal, setPreviewModal] = useState({ open: false, url: '', name: '' })
@@ -39,6 +63,23 @@ function App() {
   useEffect(() => {
     sourcesRef.current = sources
   }, [sources])
+
+  // Cross-fade between pages with the View Transitions API where the browser has it.
+  const supportsViewTransitions = typeof document !== 'undefined' && 'startViewTransition' in document
+  useEffect(() => {
+    document.documentElement.classList.toggle('no-vt', !supportsViewTransitions)
+  }, [supportsViewTransitions])
+
+  const go = (path) => {
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    if (supportsViewTransitions && !reduceMotion) {
+      document.startViewTransition(() => {
+        flushSync(() => navigate(path))
+      })
+    } else {
+      navigate(path)
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -155,23 +196,29 @@ function App() {
 
   const openPreviewModal = (source) => {
     if (!source) return
-    if (source.type === 'pdf' && source.previewUrl) {
-      setPreviewModal({ open: true, url: source.previewUrl, name: source.name, id: source.id, type: 'pdf', text: '' })
-    } else {
-      setPreviewModal({ open: true, url: '', name: source.name, id: source.id, type: 'text', text: source.preview || '' })
-    }
+    setPreviewModal({
+      open: true,
+      id: source.id,
+      name: source.name,
+      kind: source.type,
+      url: source.type === 'pdf' ? source.previewUrl || '' : '',
+      text: source.preview || '',
+      size: source.size,
+      chunks: source.chunks
+    })
   }
 
-  const closePreviewModal = () => setPreviewModal({ open: false, url: '', name: '' })
+  const closePreviewModal = () => setPreviewModal((prev) => ({ ...prev, open: false }))
 
   const requestDeleteSource = (id, name) => setConfirmDelete({ open: true, id, name })
 
   const confirmDeleteNow = () => {
     if (confirmDelete.id) removeSource(confirmDelete.id)
-    setConfirmDelete({ open: false, id: null, name: '' })
+    setConfirmDelete((prev) => ({ ...prev, open: false }))
+    closePreviewModal()
   }
 
-  const cancelDelete = () => setConfirmDelete({ open: false, id: null, name: '' })
+  const cancelDelete = () => setConfirmDelete((prev) => ({ ...prev, open: false }))
 
   const clearTypingTimer = (messageId) => {
     const existingTimer = typingTimersRef.current.get(messageId)
@@ -217,13 +264,92 @@ function App() {
   }
 
   const openHome = () => {
-    navigate('/home')
+    go('/home')
   }
 
-  const saveSource = async () => {
-    const trimmed = clipboardText.trim()
-    const hasText = sourceMode === 'text' && Boolean(trimmed)
-    const hasPdf = sourceMode === 'pdf' && Boolean(pdfFile)
+  const stopProgressPolling = () => {
+    clearInterval(pollTimerRef.current)
+    pollTimerRef.current = null
+  }
+
+  // Poll the backend for the real indexing stage (parsing, chunking, embedding n/N, ...).
+  const startProgressPolling = (jobId) => {
+    stopProgressPolling()
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const resp = await fetch(`${apiBaseUrl}/progress/${jobId}`)
+        if (!resp.ok) return
+        const p = await resp.json()
+        if (pollTimerRef.current === null) return // finished while this poll was in flight
+        if (p.stage === 'parsing') {
+          setUploadStage('reading')
+          setEmbedPercent(p.total ? Math.round((p.done / p.total) * 100) : 0)
+          setUploadDetail(p.total ? `Reading page ${Math.min(p.done + 1, p.total)} of ${p.total}` : 'Reading the document...')
+        } else if (p.stage === 'chunking' || p.stage === 'queued') {
+          setUploadStage('reading')
+          setEmbedPercent(100)
+          setUploadDetail('Splitting the text into chunks...')
+        } else if (p.stage === 'embedding') {
+          setUploadStage('embedding')
+          setEmbedPercent(p.total ? Math.round((p.done / p.total) * 100) : 0)
+          // estimate the time left from how fast the batches have been finishing
+          let timeLeft = ''
+          if (p.total && p.done >= 1) {
+            const now = Date.now()
+            if (!etaRef.current || p.done < etaRef.current.done0) etaRef.current = { t0: now, done0: p.done }
+            const { t0, done0 } = etaRef.current
+            if (p.done - done0 >= 2) {
+              const secondsLeft = ((now - t0) / 1000 / (p.done - done0)) * (p.total - p.done)
+              timeLeft = ` · ${formatTimeLeft(secondsLeft)} left`
+            }
+          }
+          const base = p.total ? `Embedding batch ${Math.min(p.done + 1, p.total)} of ${p.total}${timeLeft}` : 'Generating embeddings...'
+          setUploadDetail(p.note ? `${base} - ${p.note}` : base)
+        } else if (p.stage === 'storing') {
+          setUploadStage('embedding')
+          setEmbedPercent(100)
+          setUploadDetail('Saving to the vector database...')
+        }
+      } catch {
+        // the request itself reports real failures; ignore a missed poll
+      }
+    }, 1000)
+  }
+
+  const readErrorMessage = (status, bodyText) => {
+    try {
+      const parsed = JSON.parse(bodyText || '{}')
+      if (parsed.detail) return typeof parsed.detail === 'string' ? parsed.detail : JSON.stringify(parsed.detail)
+    } catch {
+      // not JSON
+    }
+    return `Upload failed (${status})`
+  }
+
+  // Cancel takes effect in the UI immediately; the server stops its work as soon as it sees the flag.
+  const cancelUpload = () => {
+    cancelledRef.current = true
+    xhrRef.current?.abort()
+    abortRef.current?.abort()
+    if (jobIdRef.current) {
+      fetch(`${apiBaseUrl}/cancel/${jobIdRef.current}`, { method: 'POST' }).catch(() => {})
+    }
+    stopProgressPolling()
+    setUploadStage('')
+    setUploadProgress(0)
+  }
+
+  const dismissUploadModal = () => {
+    setUploadStage('')
+    setUploadError('')
+  }
+
+  const saveSource = async (override) => {
+    const mode = override?.mode ?? sourceMode
+    const trimmed = (override?.text ?? clipboardText).trim()
+    const file = override?.file ?? pdfFile
+    const hasText = mode === 'text' && Boolean(trimmed)
+    const hasPdf = mode === 'pdf' && Boolean(file)
     if (!hasText && !hasPdf) {
       return
     }
@@ -241,91 +367,106 @@ function App() {
       return
     }
 
+    const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    jobIdRef.current = jobId
+    etaRef.current = null
+    cancelledRef.current = false
     setIsBusy(true)
+    setUploadError('')
+    setUploadProgress(0)
+    setEmbedPercent(0)
+    setUploadDetail('')
     setUploadStage('uploading')
+    startProgressPolling(jobId)
+
+    // Each pasted text gets its own name in the database, so a second paste doesn't replace the first.
+    const textSourceName = `pasted-text-${Date.now().toString(36)}`
 
     try {
       let data = {}
 
-      if (sourceMode === 'text') {
+      if (mode === 'text') {
+        // The text itself is tiny; the real wait is the server chunking + embedding it.
+        setUploadProgress(100)
+        abortRef.current = new AbortController()
         const resp = await fetch(`${apiBaseUrl}/upload-text`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: trimmed })
+          body: JSON.stringify({ text: trimmed, job_id: jobId, source_name: textSourceName }),
+          signal: abortRef.current.signal
         })
-        if (!resp.ok) throw new Error(`Upload failed (${resp.status})`)
-        data = await resp.json()
-        // simulate server chunking/embedding stages briefly for UX
-        setUploadStage('chunking')
-        await new Promise((r) => setTimeout(r, 600))
-        setUploadStage('embedding')
-        await new Promise((r) => setTimeout(r, 900))
-        setUploadStage('done')
-        setTimeout(() => setUploadStage(''), 700)
+        const bodyText = await resp.text()
+        if (!resp.ok) throw new Error(readErrorMessage(resp.status, bodyText))
+        data = JSON.parse(bodyText || '{}')
       } else {
         // use XHR so we can track upload progress for large files
         data = await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest()
+          xhrRef.current = xhr
           const formData = new FormData()
-          formData.append('file', pdfFile)
+          formData.append('file', file)
+          formData.append('job_id', jobId)
           xhr.open('POST', `${apiBaseUrl}/upload`)
 
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
-              const pct = Math.round((e.loaded / e.total) * 100)
-              setUploadProgress(pct)
+              setUploadProgress(Math.round((e.loaded / e.total) * 100))
             }
           }
 
-          xhr.onload = async () => {
-            try {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                const parsed = JSON.parse(xhr.responseText || '{}')
-                // server likely already did chunking/embedding, but present staged UX
-                resolve(parsed)
-                setUploadStage('chunking')
-                await new Promise((r) => setTimeout(r, 600))
-                setUploadStage('embedding')
-                await new Promise((r) => setTimeout(r, 900))
-                setUploadStage('done')
-                setTimeout(() => setUploadStage(''), 700)
-              } else {
-                reject(new Error(`Upload failed (${xhr.status})`))
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                resolve(JSON.parse(xhr.responseText || '{}'))
+              } catch (err) {
+                reject(err)
               }
-            } catch (err) {
-              reject(err)
+            } else {
+              reject(new Error(readErrorMessage(xhr.status, xhr.responseText)))
             }
           }
 
-          xhr.onerror = () => reject(new Error('Network error'))
+          xhr.onerror = () => reject(new Error('Could not reach the backend. Is it running?'))
+          xhr.onabort = () => reject(new Error('Upload cancelled.'))
           xhr.send(formData)
         })
-        // leave progress visible until done -> reset later
       }
 
-      if (sourceMode === 'text') {
+      stopProgressPolling()
+      setUploadStage('done')
+      setUploadDetail('Ready to chat!')
+      setTimeout(() => setUploadStage((current) => (current === 'done' ? '' : current)), 900)
+
+      if (mode === 'text') {
         setSources((prev) => [
           ...prev,
           {
             id: `text-${Date.now()}`,
             type: 'text',
             name: `Pasted text ${prev.length + 1}`,
-            preview: trimmed.slice(0, 180)
+            sourceName: textSourceName,
+            preview: trimmed.slice(0, 4000),
+            size: new Blob([trimmed]).size,
+            chunks: data.total_chunks ?? 0
           }
         ])
       } else {
-        const previewUrl = URL.createObjectURL(pdfFile)
-        const fileName = pdfFile.name.toLowerCase()
+        const fileName = file.name.toLowerCase()
         const fileType = fileName.endsWith('.csv') ? 'csv' : 'pdf'
-        const newId = `file-${Date.now()}`
+        // PDFs preview in the browser's own viewer; for CSVs show the first few KB as text.
+        const previewUrl = fileType === 'pdf' ? URL.createObjectURL(file) : undefined
+        const csvPreview = fileType === 'csv' ? await file.slice(0, 6000).text() : ''
         setSources((prev) => [
           ...prev,
           {
-            id: newId,
+            id: `file-${Date.now()}`,
             type: fileType,
-            name: pdfFile.name,
-            preview: `File uploaded: ${pdfFile.name}`,
-            previewUrl: fileType === 'pdf' ? previewUrl : undefined
+            name: file.name,
+            sourceName: file.name,
+            preview: csvPreview,
+            previewUrl,
+            size: file.size,
+            chunks: data.total_chunks ?? 0
           }
         ])
       }
@@ -345,17 +486,35 @@ function App() {
       setPdfFile(null)
       setUploadProgress(0)
     } catch (error) {
+      stopProgressPolling()
       const message = error instanceof Error ? error.message : 'Upload failed.'
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `source-error-${Date.now()}`,
-          role: 'assistant',
-          variant: 'error',
-          text: `Could not index source: ${message}`
-        }
-      ])
+      if (cancelledRef.current) {
+        // user pressed Cancel: close the progress dialog quietly
+        setUploadStage('')
+        setUploadProgress(0)
+        setMessages((prev) => [
+          ...prev,
+          { id: `source-cancel-${Date.now()}`, role: 'assistant', variant: 'info', text: 'Upload cancelled.' }
+        ])
+      } else {
+        // keep the dialog open on the error so the failure can't be missed
+        setUploadStage('error')
+        setUploadError(message)
+        setUploadProgress(0)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `source-error-${Date.now()}`,
+            role: 'assistant',
+            variant: 'error',
+            text: `Could not index source: ${message}`
+          }
+        ])
+      }
     } finally {
+      xhrRef.current = null
+      abortRef.current = null
+      jobIdRef.current = null
       setIsBusy(false)
     }
   }
@@ -366,7 +525,8 @@ function App() {
 
     setIsBusy(true)
     try {
-      const sourceName = found.type === 'text' ? 'clipboard-text' : found.name
+      // sources saved before pasted texts got their own name used one shared name
+      const sourceName = found.sourceName || (found.type === 'text' ? 'clipboard-text' : found.name)
       const resp = await fetch(`${apiBaseUrl}/delete-source`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -374,9 +534,13 @@ function App() {
       })
       if (!resp.ok) throw new Error('Failed to delete source from database')
 
-      if (found.previewUrl) URL.revokeObjectURL(found.previewUrl)
-      setSources((prev) => prev.filter((s) => s.id !== id))
-      
+      // fade the card out, then drop it from the list
+      setSources((prev) => prev.map((s) => (s.id === id ? { ...s, removing: true } : s)))
+      setTimeout(() => {
+        if (found.previewUrl) URL.revokeObjectURL(found.previewUrl)
+        setSources((prev) => prev.filter((s) => s.id !== id))
+      }, 220)
+
       setMessages((prev) => [
         ...prev,
         {
@@ -491,7 +655,7 @@ function App() {
       })
 
       if (!response.ok) {
-        throw new Error(`Query failed (${response.status})`)
+        throw new Error(readErrorMessage(response.status, await response.text()).replace(/^Upload failed/, 'Query failed'))
       }
 
       const data = await response.json()
@@ -507,14 +671,20 @@ function App() {
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Query failed.'
+      updateMessageById(assistantMessageId, { variant: 'error' })
       animateAssistantMessage(assistantMessageId, `Error calling backend: ${message}`, () =>
         setIsBusy(false)
       )
     }
   }
 
+  // keep showing the last stage while the progress dialog fades out
+  const lastStageRef = useRef('uploading')
+  if (uploadStage) lastStageRef.current = uploadStage
+  const shownStage = uploadStage || lastStageRef.current
+
   return (
-    <div className={`app ${isDragging ? 'is-dragging' : ''}`} onDragOver={handleDragOver} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+    <div className={`app ${isDragging ? 'is-dragging' : ''}`}>
       <Routes>
         <Route
           path="/"
@@ -535,127 +705,144 @@ function App() {
               onClearSources={clearSources}
               onBackToLanding={() => navigate('/')}
               isBusy={isBusy}
+              busyLabel={uploadStage ? 'Indexing...' : 'Thinking...'}
               onEnterSend={sendMessage}
               onPreviewSource={openPreviewModal}
               onRemoveSource={requestDeleteSource}
-                isDragging={isDragging}
+              isDragging={isDragging}
             />
           }
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
 
-      {onHomePage && isModalOpen && (
-        <AddSourcesModal
-          sourceMode={sourceMode}
-          clipboardText={clipboardText}
-          pdfFile={pdfFile}
-          onChangeMode={setSourceMode}
-          onChangeClipboardText={setClipboardText}
+      <AddSourcesModal
+        open={onHomePage && isModalOpen}
+        sourceMode={sourceMode}
+        clipboardText={clipboardText}
+        pdfFile={pdfFile}
+        onChangeMode={setSourceMode}
+        onChangeClipboardText={setClipboardText}
           onChangePdfFile={setPdfFile}
-          onCancel={closeModal}
-          onSave={saveSource}
-          isBusy={isBusy}
-          uploadProgress={uploadProgress}
-          isDragging={isDragging}
-        />
-      )}
+        onCancel={closeModal}
+        onSave={() => saveSource()}
+        isBusy={isBusy}
+        uploadDetail={uploadDetail}
+        isDragging={isDragging}
+      />
 
       <div className={`drop-overlay ${isDragging ? 'active' : ''}`}>
         <div className="drop-card">Release anywhere to drop</div>
       </div>
-
-      {/* top upload progress bar */}
-      <div className={`top-progress ${uploadProgress > 0 && uploadProgress < 100 ? 'visible' : ''} ${uploadStage === 'chunking' || uploadStage === 'embedding' ? 'indeterminate' : ''}`}>
-        <div className="top-progress-fill" style={{ width: uploadStage === 'chunking' || uploadStage === 'embedding' ? undefined : `${uploadProgress}%` }} />
+      {/* thin bar along the top while the file itself is uploading */}
+      <div className={`top-progress ${uploadStage === 'uploading' && uploadProgress > 0 && uploadProgress < 100 ? 'visible' : ''}`}>
+        <div className="top-progress-fill" style={{ width: `${uploadProgress}%` }} />
       </div>
 
-      {/* pdf preview modal (in-app) */}
-      {previewModal.open && (
-        <div
-          className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              closePreviewModal()
-            }
-          }}
-        >
-          <div className="modal" style={{ width: 'min(900px, 95%)', height: '80vh', padding: 12 }}>
-            <div className="modal-head">
-              <h3>{previewModal.name}</h3>
-              <div>
-                <button className="btn ghost" onClick={() => requestDeleteSource(previewModal.id, previewModal.name)} title="Delete">
-                  Delete
-                </button>
-                <button className="close" onClick={closePreviewModal}>x</button>
+      {/* source preview */}
+      <Modal open={previewModal.open} onClose={closePreviewModal} className="preview-modal" label="Source preview">
+        <div className="preview-head">
+          <div className={`file-icon file-icon-${previewModal.kind || 'text'}`} aria-hidden="true">
+            {previewModal.kind === 'text' ? 'TXT' : (previewModal.kind || 'txt').toUpperCase()}
+          </div>
+          <div className="preview-title">
+            <h3 title={previewModal.name}>{previewModal.name}</h3>
+            <span className="preview-sub">
+              {[
+                previewModal.kind === 'text' ? 'Pasted text' : (previewModal.kind || '').toUpperCase(),
+                previewModal.size ? formatFileSize(previewModal.size) : '',
+                previewModal.chunks != null ? `${previewModal.chunks} chunks indexed` : ''
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+          </div>
+          <div className="preview-actions">
+            <button className="btn danger-outline" onClick={() => requestDeleteSource(previewModal.id, previewModal.name)} disabled={isBusy}>
+              Delete
+            </button>
+            <button className="close" onClick={closePreviewModal} aria-label="Close preview">
+              ×
+            </button>
+          </div>
+        </div>
+        <div className="preview-body">
+          {previewModal.kind === 'pdf' && previewModal.url ? (
+            <iframe src={`${previewModal.url}#view=FitH`} title={previewModal.name} />
+          ) : previewModal.kind === 'pdf' ? (
+            <div className="preview-empty">
+              <strong>The PDF preview isn&apos;t available after a page refresh.</strong>
+              <span>The file is still indexed and searchable. Upload it again if you want to view it here.</span>
+            </div>
+          ) : (
+            <pre className="preview-text">{previewModal.text || 'No preview available.'}</pre>
+          )}
+        </div>
+      </Modal>
+
+      {/* delete confirmation (opens on top of the preview) */}
+      <Modal open={confirmDelete.open} onClose={cancelDelete} className="confirm-modal" onTop label="Delete source">
+        <div className="modal-head">
+          <h3>Delete source?</h3>
+        </div>
+        <p className="confirm-text">
+          <strong>{confirmDelete.name || 'This source'}</strong> will be removed from your sources and from the search
+          index. This can&apos;t be undone.
+        </p>
+        <div className="modal-actions">
+          <button className="btn" onClick={cancelDelete}>
+            Cancel
+          </button>
+          <button className="btn danger" onClick={confirmDeleteNow}>
+            Delete
+          </button>
+        </div>
+      </Modal>
+
+      {/* indexing progress */}
+      <Modal open={Boolean(uploadStage)} dismissible={false} onTop className="progress-modal" label="Indexing progress">
+        <div role="status" aria-live="polite">
+          <h3>{shownStage === 'error' ? 'Indexing failed' : 'Indexing your source...'}</h3>
+          {shownStage === 'error' ? (
+            <p className="upload-error">{uploadError}</p>
+          ) : (
+            <>
+              <div className="progress-stages">
+                <div className={`stage ${shownStage === 'uploading' ? 'active' : ''} ${['reading', 'embedding', 'done'].includes(shownStage) ? 'done' : ''}`}>Uploading</div>
+                <div className={`stage ${shownStage === 'reading' ? 'active' : ''} ${['embedding', 'done'].includes(shownStage) ? 'done' : ''}`}>Reading</div>
+                <div className={`stage ${shownStage === 'embedding' ? 'active' : ''} ${shownStage === 'done' ? 'done' : ''}`}>Embedding</div>
+                <div className={`stage ${shownStage === 'done' ? 'active' : ''}`}>Ready</div>
               </div>
-            </div>
-            <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-              {previewModal.type === 'pdf' ? (
-                <iframe src={previewModal.url} title={previewModal.name} style={{ width: '100%', height: '100%' }} />
-              ) : (
-                <div style={{ padding: 12, color: '#4b2b12' }}>{previewModal.text}</div>
-              )}
-            </div>
+              <div className="progress-bar">
+                <div
+                  className="progress-fill"
+                  style={{
+                    transform: `scaleX(${
+                      (shownStage === 'uploading' ? uploadProgress : shownStage === 'done' ? 100 : embedPercent) / 100
+                    })`
+                  }}
+                />
+              </div>
+              <div className="upload-text">
+                {shownStage === 'uploading' && `Uploading... ${uploadProgress}%`}
+                {shownStage !== 'uploading' && (uploadDetail || 'Working...')}
+              </div>
+            </>
+          )}
+          <div className="upload-actions">
+            {['uploading', 'reading', 'embedding'].includes(shownStage) && (
+              <button className="btn" onClick={cancelUpload}>
+                Cancel upload
+              </button>
+            )}
+            {shownStage === 'error' && (
+              <button className="btn primary" onClick={dismissUploadModal}>
+                Close
+              </button>
+            )}
           </div>
         </div>
-      )}
-
-      {/* delete confirm modal */}
-      {confirmDelete.open && (
-        <div
-          className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              cancelDelete()
-            }
-          }}
-        >
-          <div className="modal">
-            <div className="modal-head">
-              <h3>Delete source</h3>
-            </div>
-            <p>Are you sure you want to delete {confirmDelete.name || 'this source'}?</p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button className="btn" onClick={cancelDelete}>Cancel</button>
-              <button className="btn primary" onClick={confirmDeleteNow}>Delete</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* upload progress modal with stages */}
-      <div
-        className={`upload-progress-modal ${uploadStage ? 'visible' : ''}`}
-        onClick={(event) => {
-          if (event.target === event.currentTarget) {
-            setUploadStage('')
-          }
-        }}
-      >
-        <div className="progress-card">
-          <h3>Indexing your source...</h3>
-          <div className="progress-stages">
-            <div className={`stage ${uploadStage === 'uploading' ? 'active' : ''} ${['chunking', 'embedding', 'done'].includes(uploadStage) ? 'done' : ''}`}>Uploading</div>
-            <div className={`stage ${uploadStage === 'chunking' ? 'active' : ''} ${['embedding', 'done'].includes(uploadStage) ? 'done' : ''}`}>Chunking</div>
-            <div className={`stage ${uploadStage === 'embedding' ? 'active' : ''} ${uploadStage === 'done' ? 'done' : ''}`}>Embedding</div>
-            <div className={`stage ${uploadStage === 'done' ? 'active' : ''}`}>Ready</div>
-          </div>
-          <div className="progress-bar">
-            <div className="progress-fill" style={{ width: `${uploadProgress}%` }} />
-          </div>
-          <div className="upload-text">
-            {uploadStage === 'uploading' && `Uploading... ${uploadProgress}%`}
-            {uploadStage === 'chunking' && 'Breaking content into chunks...'}
-            {uploadStage === 'embedding' && 'Generating embeddings...'}
-            {uploadStage === 'done' && 'Ready to chat!'}
-          </div>
-        </div>
-      </div>
+      </Modal>
     </div>
   )
 }

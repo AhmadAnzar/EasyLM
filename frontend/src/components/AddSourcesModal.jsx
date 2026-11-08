@@ -1,4 +1,7 @@
+import Modal from './Modal'
+
 function AddSourcesModal({
+  open,
   sourceMode,
   clipboardText,
   pdfFile,
@@ -8,6 +11,7 @@ function AddSourcesModal({
   onCancel,
   onSave,
   isBusy,
+  uploadDetail,
   isDragging
 }) {
   const displayFileName = pdfFile
@@ -32,23 +36,14 @@ function AddSourcesModal({
       if (text) onChangeClipboardText(text)
     }
   }
-  // optionally show progress if parent supplies it via window state (App passes uploadProgress prop)
+
   return (
-    <div
-      className="modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) {
-          onCancel()
-        }
-      }}
-    >
-      <div className={`modal ${isDragging ? 'drop-zone' : ''}`} onDragOver={onDragOver} onDrop={onDrop}>
+    <Modal open={open} onClose={isBusy ? undefined : onCancel} dismissible={!isBusy} className={isDragging ? 'drop-zone' : ''} label="Add sources">
+      <div onDragOver={onDragOver} onDrop={onDrop} className="add-sources">
         <div className="modal-head">
           <h3>Add Sources</h3>
-          <button className="close" onClick={onCancel}>
-            x
+          <button className="close" onClick={onCancel} disabled={isBusy} aria-label="Close">
+            ×
           </button>
         </div>
 
@@ -88,7 +83,7 @@ function AddSourcesModal({
         {sourceMode === 'pdf' && (
           <>
             <label className="field-label" htmlFor="pdf-source">
-              Upload one file
+              Upload one file (PDF or CSV)
             </label>
 
             <div className="pdf-upload">
@@ -131,18 +126,9 @@ function AddSourcesModal({
             {isBusy ? 'Indexing...' : 'Save Source'}
           </button>
         </div>
-        {isBusy && (
-          <div style={{ marginTop: 8 }}>
-            <div className="progress-wrap">
-              <div className="progress-track">
-                <div className="progress-fill" style={{ width: `${window.__UPLOAD_PROGRESS__ || 0}%` }} />
-              </div>
-              <div className="muted">Uploading: {window.__UPLOAD_PROGRESS__ || 0}%</div>
-            </div>
-          </div>
-        )}
+        {isBusy && <div className="muted">{uploadDetail || 'Working...'}</div>}
       </div>
-    </div>
+    </Modal>
   )
 }
 

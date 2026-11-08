@@ -1,5 +1,72 @@
 import { useEffect, useRef } from 'react'
 
+function EyeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M6 6l1 14h10l1-14" />
+      <path d="M10 11v5M14 11v5" />
+    </svg>
+  )
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function SourceCard({ source, disabled, onPreview, onRemove }) {
+  const badge = source.type === 'text' ? 'TXT' : source.type.toUpperCase()
+  const kindLabel = source.type === 'text' ? 'Pasted text' : badge
+  const meta = [
+    kindLabel,
+    formatBytes(source.size),
+    source.chunks != null ? `${source.chunks} chunk${source.chunks === 1 ? '' : 's'}` : ''
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
+  return (
+    <div className={`source-card ${source.removing ? 'is-removing' : ''}`}>
+      <div className={`file-icon file-icon-${source.type}`} aria-hidden="true">
+        {badge}
+      </div>
+      <div className="source-main">
+        <div className="source-name" title={source.name}>
+          {source.name}
+        </div>
+        <div className="source-meta">{meta}</div>
+      </div>
+      <div className="source-actions">
+        <button className="icon-btn" title="Preview" aria-label={`Preview ${source.name}`} onClick={() => onPreview(source)}>
+          <EyeIcon />
+        </button>
+        <button
+          className="icon-btn danger"
+          title="Remove this source"
+          aria-label={`Remove ${source.name}`}
+          disabled={disabled}
+          onClick={() => onRemove(source.id, source.name)}
+        >
+          <TrashIcon />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function HomePage({
   siteName,
   hasSource,
@@ -12,6 +79,7 @@ function HomePage({
   onClearSources,
   onBackToLanding,
   isBusy,
+  busyLabel = 'Thinking...',
   onEnterSend,
   onPreviewSource,
   onRemoveSource,
@@ -38,7 +106,7 @@ function HomePage({
           <button className="btn primary" onClick={onOpenModal} disabled={isBusy}>
             Add Sources
           </button>
-          <button className="btn" onClick={onClearSources} disabled={isBusy}>
+          <button className="btn" onClick={onClearSources} disabled={isBusy || !hasSource}>
             Clear Sources
           </button>
         </div>
@@ -48,32 +116,32 @@ function HomePage({
         <aside className={`source-summary ${isDragging ? 'drop-zone' : ''}`}>
           <div className="section-head">
             <h3>Sources</h3>
-            <small className="muted">{sources.length}/3</small>
+            <span className="count-pill">{sources.length}/5</span>
           </div>
-          {!hasSource && <p className="muted">No source added yet.</p>}
-          <div className="source-list">
-            {sources.map((source) => (
-              <div className={`source-card ${isDragging ? 'drop-zone' : ''}`} key={source.id}>
-                <div className="source-card-head">
-                  <div>
-                    <strong>{source.name}</strong>
-                    <p className="muted">{source.type === 'text' ? 'Pasted text' : 'File source'}</p>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <span className="badge">{source.type === 'text' ? 'TEXT' : 'FILE'}</span>
-                    <button className="btn ghost" onClick={() => onRemoveSource(source.id, source.name)} title="Remove this source">✕</button>
-                  </div>
-                </div>
-                <p className="source-preview">{source.preview}</p>
-                {source.previewUrl && (
-                  <button className="btn source-preview-btn" onClick={() => onPreviewSource(source)}>
-                    Preview file
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="source-hint">You can keep up to 3 sources at the same time.</div>
+
+          {hasSource ? (
+            <div className="source-list">
+              {sources.map((source) => (
+                <SourceCard
+                  key={source.id}
+                  source={source}
+                  disabled={isBusy}
+                  onPreview={onPreviewSource}
+                  onRemove={onRemoveSource}
+                />
+              ))}
+            </div>
+          ) : (
+            <button type="button" className="source-empty" onClick={onOpenModal} disabled={isBusy}>
+              <span className="source-empty-icon" aria-hidden="true">
+                +
+              </span>
+              <strong>Add your first source</strong>
+              <span>Drop a PDF or CSV anywhere on the page, or paste some text.</span>
+            </button>
+          )}
+
+          <div className="source-hint">You can keep up to 5 sources at the same time.</div>
         </aside>
 
         <div className={`chat-box ${isDragging ? 'drop-zone' : ''}`}>
@@ -125,7 +193,7 @@ function HomePage({
               }}
             />
             <button className="btn primary" onClick={onSend} disabled={isBusy}>
-              {isBusy ? 'Thinking...' : 'Send'}
+              {isBusy ? busyLabel : 'Send'}
             </button>
           </div>
         </div>

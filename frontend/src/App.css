@@ -174,30 +174,13 @@
   }
 }
 
-/* upload progress modal with stages */
-.upload-progress-modal {
-  position: fixed;
-  inset: 0;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  z-index: 110;
-  background: rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(4px);
-}
-.upload-progress-modal.visible {
-  display: flex;
-}
-.upload-progress-modal .progress-card {
-  background: linear-gradient(160deg, rgba(255, 251, 239, 0.95), rgba(244, 220, 166, 0.88));
-  border: 1px solid rgba(130, 78, 37, 0.22);
-  border-radius: 20px;
+/* upload progress dialog (rendered inside the shared Modal) */
+.modal.progress-modal {
+  width: min(520px, 100%);
   padding: 24px 32px;
-  box-shadow: 0 24px 48px -30px rgba(70, 36, 14, 0.5);
-  width: min(520px, calc(100vw - 32px));
   text-align: center;
 }
-.progress-card h3 {
+.progress-modal h3 {
   margin: 0 0 12px;
   color: #5a3114;
   font-size: 18px;
@@ -250,6 +233,28 @@
   font-size: 14px;
   font-weight: 600;
   margin-top: 12px;
+}
+.upload-error {
+  color: #8a2a12;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 8px 0 4px;
+  text-align: left;
+  white-space: pre-wrap;
+}
+.upload-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+.upload-actions:empty {
+  display: none;
+}
+/* the chunking stage has no measurable progress, so show a moving bar instead */
+.progress-bar.indeterminate .progress-fill {
+  width: 40% !important;
+  animation: indeterminate 1.2s infinite linear;
 }
 
 /* Styled PDF file chooser to match clipboard textarea */
@@ -665,20 +670,18 @@
   box-shadow: 0 20px 34px -30px rgba(73, 38, 14, 0.5);
 }
 
+/* Cards size to their content and stack from the top. (A grid here used to stretch a single
+   card to the full panel height, which is what made it look so broken.) */
 .source-list {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  align-content: flex-start;
+  gap: 10px;
   min-height: 0;
-  max-height: none;
   flex: 1;
-  overflow: auto;
-  padding-right: 4px;
-}
-
-.source-card .btn.ghost {
-  background: transparent;
-  border: 1px solid rgba(0,0,0,0.06);
-  padding: 6px 8px;
+  overflow-y: auto;
+  padding: 2px 4px 2px 0;
 }
 
 .progress-track {
@@ -698,49 +701,185 @@
 .small-muted { color: #6d4a2d; font-size: 12px; margin-top: 6px }
 
 .source-card {
-  border: 1px solid rgba(137, 83, 43, 0.28);
-  border-radius: 12px;
-  background: rgba(255, 248, 229, 0.72);
-  padding: 8px 10px;
-  display: grid;
-  gap: 5px;
-  transition: transform 0.16s ease, box-shadow 0.16s ease;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid rgba(137, 83, 43, 0.24);
+  border-radius: 16px;
+  background: rgba(255, 250, 236, 0.85);
+  padding: 10px 12px;
+  box-shadow: 0 10px 22px -20px rgba(85, 47, 20, 0.55);
+  animation: cardIn 260ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.2s ease;
 }
 
 .source-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 16px 24px -22px rgba(85, 47, 20, 0.6);
+  transform: translateY(-1px);
+  box-shadow: 0 14px 26px -20px rgba(85, 47, 20, 0.6);
 }
 
-.source-card-head {
+.source-card.is-removing {
+  opacity: 0;
+  transform: translateX(14px) scale(0.98);
+  pointer-events: none;
+}
+
+.file-icon {
+  flex: 0 0 auto;
+  width: 42px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: #fff7df;
+  background: linear-gradient(145deg, #b4642b, #8b4b23);
+}
+
+.file-icon-pdf {
+  background: linear-gradient(145deg, #c9552f, #9c3a1c);
+}
+
+.file-icon-csv {
+  background: linear-gradient(145deg, #5f8a4e, #3f6637);
+}
+
+.file-icon-text {
+  background: linear-gradient(145deg, #b4803a, #85571f);
+}
+
+.source-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.source-name {
+  color: #4f2a10;
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.source-meta {
+  color: #7a5535;
+  font-size: 12px;
+}
+
+.source-actions {
+  flex: 0 0 auto;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 4px;
 }
 
-.source-card-head strong,
-.source-card strong {
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: #6d4626;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: rgba(198, 123, 58, 0.16);
+  border-color: rgba(137, 83, 43, 0.25);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  background: rgba(181, 54, 36, 0.14);
+  border-color: rgba(181, 54, 36, 0.35);
+  color: #a3301c;
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.count-pill {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6d4626;
+  background: rgba(255, 248, 229, 0.9);
+  border: 1px solid rgba(137, 83, 43, 0.28);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.source-empty {
+  flex: 1;
+  min-height: 160px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 6px;
+  text-align: center;
+  padding: 20px;
+  border: 2px dashed rgba(137, 83, 43, 0.35);
+  border-radius: 18px;
+  background: rgba(255, 250, 236, 0.5);
+  color: #6d4a2d;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.source-empty:hover:not(:disabled) {
+  background: rgba(255, 244, 214, 0.85);
+  border-color: rgba(198, 123, 58, 0.7);
+}
+
+.source-empty strong {
   color: #5a3114;
+  font-size: 15px;
 }
 
-.source-preview {
-  margin: 0;
-  color: #6f4929;
-  font-size: 12px;
-  line-height: 1.4;
+.source-empty span:last-child {
+  font-size: 13px;
+  max-width: 24ch;
 }
 
-.source-preview-btn {
-  width: fit-content;
-  padding: 6px 10px;
-  font-size: 12px;
+.source-empty-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 26px;
+  line-height: 1;
+  color: #fff7df;
+  background: linear-gradient(135deg, #8b4b23, #e2ac46);
 }
 
 .source-hint {
-  margin-top: 4px;
+  margin-top: 2px;
   color: #6d4a2d;
-  font-size: 13px;
+  font-size: 12px;
+}
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .chat-box {
@@ -960,36 +1099,191 @@
   color: #6d4a2d;
 }
 
+/* Dialogs. No backdrop-filter on purpose: a full-screen blur re-rendered on every frame behind an
+   animated progress bar was a major source of lag on integrated GPUs. A plain tint is free. */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: linear-gradient(145deg, rgba(62, 31, 12, 0.42), rgba(89, 45, 15, 0.28));
+  z-index: 100;
+  background: rgba(52, 27, 10, 0.5);
   display: flex;
   justify-content: center;
   align-items: center;
   padding: 16px;
-  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.modal-overlay.is-open {
+  opacity: 1;
+}
+
+/* a dialog that is fading in or out must not swallow clicks meant for what is behind it */
+.modal-overlay:not(.is-open) {
+  pointer-events: none;
+}
+
+.modal-overlay.on-top {
+  z-index: 120;
 }
 
 .modal {
   width: min(680px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
   background:
     radial-gradient(circle at 12% 10%, rgba(255, 244, 208, 0.52), transparent 34%),
-    linear-gradient(160deg, rgba(255, 250, 238, 0.97), rgba(243, 217, 158, 0.88));
+    linear-gradient(160deg, rgba(255, 250, 238, 0.99), rgba(243, 217, 158, 0.92));
   border: 1px solid rgba(125, 75, 35, 0.24);
   border-radius: 26px;
   padding: 22px;
-  display: grid;
-  gap: 14px;
   box-shadow:
     0 36px 60px -34px rgba(70, 36, 14, 0.58),
     inset 0 1px 0 rgba(255, 252, 244, 0.68);
+  opacity: 0;
+  transform: translateY(16px) scale(0.97);
+  transition: opacity 200ms ease, transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.modal-overlay.is-open .modal {
+  opacity: 1;
+  transform: none;
+}
+
+.add-sources {
+  display: grid;
+  gap: 14px;
+}
+
+.confirm-modal {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 14px;
+}
+
+.confirm-text {
+  color: #5f3c20;
+  line-height: 1.5;
 }
 
 .modal-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+/* source preview dialog: fixed header, body fills the rest */
+.modal.preview-modal {
+  width: min(980px, 96vw);
+  height: min(88vh, 920px);
+  max-height: none;
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: hidden;
+}
+
+.preview-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.preview-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.preview-title h3 {
+  font-size: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-sub {
+  color: #7a5535;
+  font-size: 12px;
+}
+
+.preview-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 1px solid rgba(125, 75, 35, 0.22);
+  border-radius: 16px;
+  overflow: hidden;
+  background: #fffdf7;
+  display: flex;
+}
+
+.preview-body iframe {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.preview-text {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 16px 18px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Cascadia Mono', Consolas, 'SFMono-Regular', monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #4b2b12;
+}
+
+.preview-empty {
+  flex: 1 1 auto;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: #6d4a2d;
+}
+
+.preview-empty strong {
+  color: #5a3114;
+}
+
+.btn.danger {
+  background: linear-gradient(135deg, #a3301c, #c4472b);
+  border-color: rgba(120, 30, 15, 0.6);
+  color: #fff4ee;
+}
+
+.btn.danger-outline {
+  background: transparent;
+  border-color: rgba(181, 54, 36, 0.45);
+  color: #a3301c;
+}
+
+.btn.danger-outline:hover:not(:disabled) {
+  background: rgba(181, 54, 36, 0.1);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 .field-label {
@@ -1174,5 +1468,79 @@
 
   .chat-box {
     min-height: 520px;
+  }
+}
+
+/* ---- Progress bar: animate transform (cheap) instead of width (forces layout every frame) ---- */
+.progress-modal .progress-bar {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.progress-modal .progress-fill {
+  width: 100%;
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 260ms ease;
+  will-change: transform;
+}
+
+/* ---- Page transitions: landing <-> app ---- */
+@keyframes pageIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pageOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.99);
+  }
+}
+
+/* Browsers with View Transitions cross-fade the old and new page. */
+::view-transition-old(root) {
+  animation: 240ms cubic-bezier(0.4, 0, 1, 1) both pageOut;
+}
+
+::view-transition-new(root) {
+  animation: 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both pageIn;
+}
+
+/* Everyone else just gets the entrance animation. */
+html.no-vt .app > .landing,
+html.no-vt .app > .workspace {
+  animation: pageIn 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Landing page content settles in a beat after the page itself. */
+.landing-card,
+.landing-nav {
+  animation: pageIn 520ms cubic-bezier(0.2, 0.8, 0.2, 1) 60ms backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
   }
 }

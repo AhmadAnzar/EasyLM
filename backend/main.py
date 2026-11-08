@@ -19,7 +19,7 @@ import requests
 from langchain_openai import ChatOpenAI
 from openai import BadRequestError
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, VectorParams
 from prompts import RAG_SYSTEM_PROMPT
 
 # pypdf logs a warning per damaged object in some PDFs; thousands of lines slow the server down.
@@ -188,10 +188,30 @@ def _lower_process_priority():
 
 @app.on_event("startup")
 def _startup_checks():
-    voyage_url = os.environ.get("VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings")
-    print(f"Voyage endpoint configured: {voyage_url}")
-    api_key_set = bool(os.environ.get("VOYAGE_API_KEY"))
-    print(f"VOYAGE_API_KEY set: {api_key_set}")
+    _lower_process_priority()
+    print(f"Embedding provider: {EMBEDDING_PROVIDER}")
+    if EMBEDDING_PROVIDER == "voyage":
+        voyage_url = os.environ.get("VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings")
+        print(f"Voyage endpoint configured: {voyage_url}")
+        print(f"VOYAGE_API_KEY set: {bool(os.environ.get('VOYAGE_API_KEY'))}")
+    else:
+        print(f"Local embedding model: {LOCAL_EMBEDDING_MODEL}")
+        try:
+            _get_local_model()  # load now so the first request isn't slow
+            print("Local embedding model ready.")
+        except Exception as e:
+            print(f"Warning: could not preload the embedding model ({e}); will retry on first use.")
+    print(f"Qdrant collection: {QDRANT_COLLECTION}")
+
+    # Warm up the Qdrant and Groq clients so the first question isn't slower than the rest.
+    try:
+        _get_qdrant_client()
+    except Exception as e:
+        print(f"Warning: could not warm up Qdrant ({e}).")
+    try:
+        _get_llm()
+    except Exception as e:
+        print(f"Warning: could not warm up the Groq client ({e}).")
 
 
 def get_embedding(text: str):
@@ -262,8 +282,8 @@ def get_embeddings_batch(texts: list[str], job_id=None):
 
     return all_embeddings
 
-if not os.environ.get("GITHUB_TOKEN"):
-    print("Warning: GITHUB_TOKEN is missing.")
+if not os.environ.get("GROQ_API_KEY"):
+    print("Warning: GROQ_API_KEY is missing.")
 
 llm = None
 def _get_llm():
@@ -272,11 +292,18 @@ def _get_llm():
         api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
             raise RuntimeError("GROQ_API_KEY is not set in the environment or .env file.")
+        model_name = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+        extra = {}
+        # gpt-oss models "think" before answering. For grounded Q&A over retrieved text,
+        # low effort is plenty and roughly halves the latency and token usage.
+        if "gpt-oss" in model_name:
+            extra["reasoning_effort"] = os.environ.get("GROQ_REASONING_EFFORT", "low")
         llm = ChatOpenAI(
-            model="llama-3.3-70b-versatile",
+            model=model_name,
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
             temperature=0.1,
+            **extra,
         )
     return llm
 
@@ -320,6 +347,9 @@ class QueryRequest(BaseModel):
 
 class TextUploadRequest(BaseModel):
     text: str
+    job_id: str | None = None
+    source_name: str | None = None
+
 def _load_pdf_documents(file_path: str, source_name: str, job_id=None):
     """Read a PDF page by page so the UI can show progress and the user can cancel."""
     reader = PdfReader(file_path)
@@ -376,6 +406,20 @@ def _load_csv_documents(file_path: str, source_name: str):
                     )
     return documents
 
+def _ensure_source_index(client):
+    """Qdrant Cloud refuses filtered deletes on `source_name` without a payload index.
+
+    Creating an index that already exists is harmless, so this is safe to call every time.
+    """
+    try:
+        client.create_payload_index(
+            collection_name=QDRANT_COLLECTION,
+            field_name="source_name",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+    except Exception as e:
+        print(f"Notice: Could not create payload index on 'source_name': {e}")
+
 def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
     _set_progress(job_id, stage="chunking")
     text_splitter = RecursiveCharacterTextSplitter(
@@ -404,6 +448,8 @@ def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
                 distance=Distance.COSINE,
             ),
         )
+
+    _ensure_source_index(client)
 
     # To avoid duplicate chunks if the same filename is uploaded again,
     # delete any existing points with this source_name.
@@ -467,6 +513,8 @@ class DeleteSourceRequest(BaseModel):
 async def delete_source(req: DeleteSourceRequest):
     client = _get_qdrant_client()
     from qdrant_client.models import Filter, FieldCondition, MatchValue
+    if client.collection_exists(collection_name=QDRANT_COLLECTION):
+        _ensure_source_index(client)
     try:
         client.delete(
             collection_name=QDRANT_COLLECTION,
@@ -566,8 +614,14 @@ async def upload_text(payload: TextUploadRequest):
     if not text:
         return {"message": "No text provided.", "total_chunks": 0}
 
-    docs = [Document(page_content=text, metadata={"source": "clipboard-text"})]
-    total_chunks = await run_in_threadpool(_index_documents, docs, source_name="clipboard-text", upload_type="text")
+    job_id = payload.job_id
+    source_name = (payload.source_name or "clipboard-text").strip()[:120] or "clipboard-text"
+    docs = [Document(page_content=text, metadata={"source": source_name})]
+    try:
+        total_chunks = await run_in_threadpool(_index_documents, docs, source_name=source_name, upload_type="text", job_id=job_id)
+    except Exception as e:
+        raise _fail_job(job_id, e)
+    _set_progress(job_id, stage="done", total_chunks=total_chunks)
     return {
         "message": "Text ingested successfully.",
         "total_chunks": total_chunks,
@@ -580,7 +634,7 @@ async def query_document(req: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error embedding query: {e}")
     try:
-        search_result = _search_qdrant(query_vector, TOP_K)
+        search_result = await run_in_threadpool(_search_qdrant, query_vector, TOP_K)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error searching Qdrant: {e}")
 
@@ -617,7 +671,7 @@ async def query_document(req: QueryRequest):
 
     try:
         llm_instance = _get_llm()
-        response = llm_instance.invoke(messages)
+        response = await run_in_threadpool(llm_instance.invoke, messages)
     except BadRequestError as error:
         if "content_filter" in str(error):
             return {"answer": "The backend blocked this request.", "source_chunks": searched_chunks}

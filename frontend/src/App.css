@@ -5,64 +5,10 @@
   overflow: hidden;
 }
 
-.app.is-dragging {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  cursor: grabbing;
-  transition: background-color 140ms ease, color 140ms ease;
-}
-
+/* Dragging a file over the page only shows the overlay below. It must not touch the page layout:
+   an earlier version re-flowed the whole app into a narrow grid and blurred it, which was laggy. */
 .app.is-dragging > :not(.drop-overlay) {
   pointer-events: none;
-}
-
-.app.is-dragging .workspace,
-.app.is-dragging .landing,
-.app.is-dragging .modal-overlay {
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  filter: blur(1px) saturate(0.95);
-}
-
-.app.is-dragging .workspace,
-.app.is-dragging .landing {
-  position: relative;
-}
-
-.app.is-dragging .workspace::before,
-.app.is-dragging .landing::before {
-  content: '';
-  position: fixed;
-  width: 100%;
-  min-width: 0;
-  inset: 0;
-  background:
-    radial-gradient(circle at 20% 20%, rgba(255, 219, 128, 0.14), transparent 28%),
-    radial-gradient(circle at 80% 75%, rgba(164, 92, 42, 0.12), transparent 30%),
-    rgba(88, 56, 28, 0.35);
-  z-index: 40;
-  pointer-events: none;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-/* FIXED SECOND BROKEN BLOCK */
-.app.is-dragging .workspace,
-.app.is-dragging .landing,
-.app.is-dragging .app-grid,
-.app.is-dragging .topbar {
-  max-width: 42%;
-  flex: 0 1 42%;
-  min-width: 0;
-}
-
-.app.is-dragging .chat-box,
-.app.is-dragging .notes-panel,
-.app.is-dragging .modal,
-.app.is-dragging .source-card {
-  transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
 .drop-zone {
@@ -79,58 +25,155 @@
   background: rgba(255, 253, 247, 0.98) !important;
 }
 
+/* Full-screen drop zone: instead of a button or icon, the whole page is washed with a slowly
+   moving gradient. The gradient layer is moved with transform (compositor only), so it stays
+   smooth. It is always in the DOM and fades in, so showing it never changes the page layout, and
+   pointer-events stay off so the drop reaches the document handler. */
 .drop-overlay {
+  --wash-1: rgba(255, 205, 110, 0.5);
+  --wash-2: rgba(238, 140, 62, 0.42);
+  --wash-3: rgba(255, 233, 160, 0.52);
+  --wash-edge: rgba(214, 128, 44, 0.7);
   position: fixed;
   inset: 0;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  padding-top: 20px;
-  z-index: 100;
+  z-index: 140; /* above every dialog */
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 240ms ease, visibility 0s linear 240ms;
 }
+
 .drop-overlay.active {
-  display: flex;
-  pointer-events: none;
-}
-.drop-overlay .drop-card {
-  pointer-events: none;
-  min-width: min(420px, calc(100vw - 32px));
-  max-width: min(620px, calc(100vw - 32px));
-  text-align: center;
-  background: linear-gradient(160deg, rgba(255, 249, 231, 0.92), rgba(244, 220, 166, 0.82));
-  border: 1px solid rgba(130, 78, 37, 0.22);
-  border-radius: 999px;
-  padding: 12px 22px;
-  box-shadow: 0 18px 42px -28px rgba(70, 36, 14, 0.45);
-  color: #5a3114;
-  font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.4px;
-  backdrop-filter: none;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
-  animation: dragHintIn 140ms ease-out both;
+  visibility: visible;
+  opacity: 1;
+  transition: opacity 240ms ease, visibility 0s;
 }
 
-.drop-overlay.active::after {
-  content: '';
-  position: fixed;
+.drop-overlay.is-bad {
+  --wash-1: rgba(255, 150, 130, 0.52);
+  --wash-2: rgba(226, 84, 62, 0.42);
+  --wash-3: rgba(255, 196, 180, 0.54);
+  --wash-edge: rgba(196, 58, 38, 0.75);
+}
+
+.drop-wash {
+  position: absolute;
   inset: 0;
-  background:
-    radial-gradient(circle at 18% 18%, rgba(255, 219, 128, 0.11), transparent 34%),
-    radial-gradient(circle at 82% 78%, rgba(146, 79, 34, 0.11), transparent 34%),
-    rgba(57, 35, 17, 0.10);
-  backdrop-filter: blur(1px);
-  pointer-events: none;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 4px var(--wash-edge), inset 0 0 140px 20px var(--wash-edge);
 }
 
-.drop-overlay .drop-card,
-.drop-overlay.active::after {
-  transition: opacity 140ms ease, transform 140ms ease, background-color 140ms ease;
+/* three tiles side by side, scrolled by exactly one tile per loop, so it repeats seamlessly */
+.drop-wash::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 300%;
+  background-image: linear-gradient(100deg, var(--wash-1), var(--wash-2), var(--wash-3), var(--wash-1));
+  background-size: 33.3334% 100%;
+  background-repeat: repeat-x;
+  animation: dropFlow 3.6s linear infinite;
+  will-change: transform;
+}
+
+.drop-card {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  max-width: min(520px, calc(100vw - 64px));
+  text-align: center;
+  color: #4b2b12;
+  text-shadow: 0 1px 14px rgba(255, 246, 220, 0.9);
+  opacity: 0;
+  transition: opacity 260ms ease 60ms;
 }
 
 .drop-overlay.active .drop-card {
-  background: linear-gradient(160deg, rgba(255, 251, 239, 0.94), rgba(243, 216, 156, 0.88));
+  opacity: 1;
+}
+
+.drop-title {
+  font-family: var(--display);
+  font-size: clamp(24px, 3.2vw, 36px);
+  font-weight: 600;
   color: #4b2b12;
+}
+
+.drop-overlay.is-bad .drop-title {
+  color: #8a2410;
+}
+
+.drop-sub {
+  font-size: 16px;
+  color: #6d4a2d;
+}
+
+.drop-overlay.is-bad .drop-sub {
+  color: #8a3a28;
+}
+
+@keyframes dropFlow {
+  to {
+    transform: translateX(-33.3334%);
+  }
+}
+
+/* In-app notice used instead of browser alerts */
+.toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 12px 14px 12px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(181, 54, 36, 0.4);
+  background: #fff1ec;
+  color: #7d2412;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  box-shadow: 0 20px 40px -22px rgba(90, 30, 15, 0.55);
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, -16px);
+  transition: opacity 220ms ease, transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s linear 280ms;
+}
+
+.toast.info {
+  border-color: rgba(137, 83, 43, 0.4);
+  background: #fff7e3;
+  color: #5a3114;
+}
+
+.toast.is-open {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+  transition: opacity 220ms ease, transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s;
+}
+
+.toast-close {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.toast-close:hover {
+  opacity: 1;
 }
 
 .top-progress {

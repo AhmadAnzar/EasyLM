@@ -7,6 +7,23 @@ import HomePage from './components/HomePage'
 import LandingPage from './components/LandingPage'
 import Modal from './components/Modal'
 
+const SUPPORTED_EXTENSIONS = ['.pdf', '.csv']
+const SUPPORTED_LABEL = 'PDF or CSV'
+// While dragging, browsers only expose the MIME type (not the file name). Windows reports CSVs as
+// text/csv or as the Excel type depending on what is installed, so those all count as "maybe fine".
+const DRAG_OK_MIME_TYPES = new Set([
+  'application/pdf',
+  'text/csv',
+  'application/csv',
+  'text/comma-separated-values',
+  'application/vnd.ms-excel'
+])
+
+const isSupportedFile = (file) => {
+  const name = (file?.name || '').toLowerCase()
+  return SUPPORTED_EXTENSIONS.some((extension) => name.endsWith(extension))
+}
+
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
@@ -17,6 +34,16 @@ function formatTimeLeft(seconds) {
   if (seconds < 8) return 'a few seconds'
   if (seconds < 55) return `about ${Math.round(seconds / 5) * 5} s`
   return `about ${Math.ceil(seconds / 60)} min`
+}
+
+// 'ok' (or unknown until drop), 'bad' (a file type we can't read) or 'multi' (more than one file)
+function classifyDrag(dataTransfer) {
+  const fileItems = Array.from(dataTransfer?.items || []).filter((item) => item.kind === 'file')
+  if (fileItems.length === 0) return 'ok' // dragging text
+  if (fileItems.length > 1) return 'multi'
+  const type = fileItems[0].type
+  if (!type) return 'ok'
+  return DRAG_OK_MIME_TYPES.has(type) ? 'ok' : 'bad'
 }
 
 
@@ -50,19 +77,24 @@ function App() {
   const abortRef = useRef(null)
   const etaRef = useRef(null)
   const cancelledRef = useRef(false)
+  const handleDropRef = useRef(null)
   const [isBusy, setIsBusy] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
+  const [dragKind, setDragKind] = useState('ok') // what is currently being dragged: 'ok' | 'bad' | 'multi'
+  const [toast, setToast] = useState({ open: false, text: '', kind: 'error' })
+  const toastTimerRef = useRef(null)
   const [previewModal, setPreviewModal] = useState({ open: false, url: '', name: '' })
   const [confirmDelete, setConfirmDelete] = useState({ open: false, id: null, name: '' })
 
   const siteName = 'EasyLM'
-  const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:10000').replace(/\/$/, '')
+  const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
   const hasSource = sources.length > 0
   const onHomePage = location.pathname === '/home'
 
   useEffect(() => {
     sourcesRef.current = sources
   }, [sources])
+
 
   // Cross-fade between pages with the View Transitions API where the browser has it.
   const supportsViewTransitions = typeof document !== 'undefined' && 'startViewTransition' in document
@@ -83,6 +115,8 @@ function App() {
 
   useEffect(() => {
     return () => {
+      clearInterval(pollTimerRef.current)
+      clearTimeout(toastTimerRef.current)
       typingTimersRef.current.forEach((timerId) => clearInterval(timerId))
       typingTimersRef.current.clear()
       sourcesRef.current.forEach((source) => {
@@ -93,84 +127,91 @@ function App() {
     }
   }, [])
 
-  useEffect(() => {
-    // expose upload progress for modal (simple bridge)
-    try {
-      window.__UPLOAD_PROGRESS__ = uploadProgress
-    } catch (e) {}
-  }, [uploadProgress])
-
-  // Drag & drop handlers for entire app: accept supported files or plain text drops
-  const handleDragOver = (e) => {
-    e.preventDefault()
+  // A short in-app message (instead of a browser alert) for things like unsupported files.
+  const showToast = (text, kind = 'error') => {
+    clearTimeout(toastTimerRef.current)
+    setToast({ open: true, text, kind })
+    toastTimerRef.current = setTimeout(() => setToast((prev) => ({ ...prev, open: false })), 5000)
   }
 
-  const handleDragEnter = (e) => {
-    e.preventDefault()
-    dragCounterRef.current = (dragCounterRef.current || 0) + 1
-    setIsDragging(true)
+  const dismissToast = () => {
+    clearTimeout(toastTimerRef.current)
+    setToast((prev) => ({ ...prev, open: false }))
   }
 
-  const handleDragLeave = (e) => {
-    e.preventDefault()
-    dragCounterRef.current = Math.max(0, (dragCounterRef.current || 0) - 1)
-    if (dragCounterRef.current === 0) setIsDragging(false)
+  // Used by the Add Sources dialog (file picker and its own drop zone) so every entry point
+  // applies the same file-type rule.
+  const selectFile = (file) => {
+    if (file && !isSupportedFile(file)) {
+      showToast(`"${file.name}" isn't supported. Please choose a ${SUPPORTED_LABEL} file.`)
+      return
+    }
+    setPdfFile(file)
   }
 
-  const handleDrop = async (e) => {
-    e.preventDefault()
-    dragCounterRef.current = 0
-    setIsDragging(false)
+  // Drag & drop anywhere on the page: a supported file (or text) is added; anything else gets a message.
+  // The newest handler is kept in a ref so the document listeners below are attached once.
+  handleDropRef.current = async (e) => {
+    const files = Array.from(e.dataTransfer?.files || [])
 
-    // Files first
-    const files = e.dataTransfer?.files
-    if (files && files.length) {
-      const file = files[0]
-      const fileName = file.name?.toLowerCase() || ''
-      const isSupportedFile =
-        file.type === 'application/pdf' ||
-        file.type === 'text/csv' ||
-        fileName.endsWith('.pdf') ||
-        fileName.endsWith('.csv')
-
-      if (isSupportedFile) {
-        setSourceMode('pdf')
-        setPdfFile(file)
-        // auto-save the dropped file
-        // slight delay to ensure state updates
-        setTimeout(() => saveSource(), 80)
-        return
-      }
+    if (files.length > 1) {
+      showToast('Please drop one file at a time.')
+      return
     }
 
-    // fallback: text/plain drop
+    if (files.length === 1) {
+      const file = files[0]
+      if (!isSupportedFile(file)) {
+        showToast(`"${file.name}" isn't supported. Please upload a ${SUPPORTED_LABEL} file.`)
+        return
+      }
+      if (isBusy) {
+        showToast('Please wait for the current upload to finish.', 'info')
+        return
+      }
+      if (!onHomePage) go('/home')
+      setSourceMode('pdf')
+      setPdfFile(file)
+      // With the Add Sources dialog open the file is just selected (the user presses Save).
+      if (!isModalOpen) saveSource({ mode: 'pdf', file })
+      return
+    }
+
     try {
       const text = e.dataTransfer.getData('text/plain')
       if (text && text.trim()) {
+        if (isBusy) {
+          showToast('Please wait for the current upload to finish.', 'info')
+          return
+        }
+        if (!onHomePage) go('/home')
         setSourceMode('text')
         setClipboardText(text)
-        setTimeout(() => saveSource(), 80)
+        if (!isModalOpen) saveSource({ mode: 'text', text })
       }
-    } catch (err) {
+    } catch {
       // ignore
     }
   }
 
-  // ensure drag/drop works anywhere on the page by attaching document-level listeners
   useEffect(() => {
     const onDocDragEnter = (e) => {
       e.preventDefault()
-      dragCounterRef.current = (dragCounterRef.current || 0) + 1
+      dragCounterRef.current += 1
+      setDragKind(classifyDrag(e.dataTransfer))
       setIsDragging(true)
     }
 
     const onDocDragOver = (e) => {
       e.preventDefault()
+      const kind = classifyDrag(e.dataTransfer)
+      setDragKind(kind) // bails out when unchanged, so this is cheap even though dragover fires constantly
+      if (e.dataTransfer) e.dataTransfer.dropEffect = kind === 'ok' ? 'copy' : 'none' // "not allowed" cursor
     }
 
     const onDocDragLeave = (e) => {
       e.preventDefault()
-      dragCounterRef.current = Math.max(0, (dragCounterRef.current || 0) - 1)
+      dragCounterRef.current = Math.max(0, dragCounterRef.current - 1)
       if (dragCounterRef.current === 0) setIsDragging(false)
     }
 
@@ -178,7 +219,7 @@ function App() {
       e.preventDefault()
       dragCounterRef.current = 0
       setIsDragging(false)
-      handleDrop(e)
+      handleDropRef.current?.(e)
     }
 
     document.addEventListener('dragenter', onDocDragEnter)
@@ -192,8 +233,10 @@ function App() {
       document.removeEventListener('dragleave', onDocDragLeave)
       document.removeEventListener('drop', onDocDrop)
     }
-  }, [handleDrop])
+  }, [])
 
+  // The dialogs below stay mounted and are driven by `open`, so they can animate out;
+  // that is why closing only flips `open` and keeps the rest of the data.
   const openPreviewModal = (source) => {
     if (!source) return
     setPreviewModal({
@@ -723,7 +766,7 @@ function App() {
         pdfFile={pdfFile}
         onChangeMode={setSourceMode}
         onChangeClipboardText={setClipboardText}
-          onChangePdfFile={setPdfFile}
+        onChangePdfFile={selectFile}
         onCancel={closeModal}
         onSave={() => saveSource()}
         isBusy={isBusy}
@@ -731,9 +774,31 @@ function App() {
         isDragging={isDragging}
       />
 
-      <div className={`drop-overlay ${isDragging ? 'active' : ''}`}>
-        <div className="drop-card">Release anywhere to drop</div>
+      {/* full-screen drop zone, shown while anything is dragged over the window */}
+      <div className={`drop-overlay ${isDragging ? 'active' : ''} ${dragKind !== 'ok' ? 'is-bad' : ''}`} aria-hidden={!isDragging}>
+        <div className="drop-wash" />
+        <div className="drop-card">
+          <div className="drop-title">
+            {dragKind === 'ok' && 'Drop to add your source'}
+            {dragKind === 'bad' && "This file type isn't supported"}
+            {dragKind === 'multi' && 'Drop one file at a time'}
+          </div>
+          <div className="drop-sub">
+            {dragKind === 'ok' && `${SUPPORTED_LABEL} files, or selected text`}
+            {dragKind === 'bad' && `Only ${SUPPORTED_LABEL} files can be added.`}
+            {dragKind === 'multi' && `Choose a single ${SUPPORTED_LABEL} file.`}
+          </div>
+        </div>
       </div>
+
+      {/* in-app notice (used instead of browser alerts) */}
+      <div className={`toast ${toast.open ? 'is-open' : ''} ${toast.kind}`} role="alert" aria-live="assertive">
+        <span>{toast.text}</span>
+        <button className="toast-close" onClick={dismissToast} aria-label="Dismiss">
+          ×
+        </button>
+      </div>
+
       {/* thin bar along the top while the file itself is uploading */}
       <div className={`top-progress ${uploadStage === 'uploading' && uploadProgress > 0 && uploadProgress < 100 ? 'visible' : ''}`}>
         <div className="top-progress-fill" style={{ width: `${uploadProgress}%` }} />

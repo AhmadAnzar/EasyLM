@@ -14,13 +14,13 @@ from pydantic import BaseModel
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 import requests
 from langchain_openai import ChatOpenAI
 from openai import BadRequestError
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, VectorParams
-from prompts import RAG_SYSTEM_PROMPT
+from prompts import CONDENSE_QUESTION_PROMPT, RAG_SYSTEM_PROMPT
 
 # pypdf logs a warning per damaged object in some PDFs; thousands of lines slow the server down.
 logging.getLogger("pypdf").setLevel(logging.ERROR)
@@ -342,8 +342,13 @@ def _get_qdrant_client():
             qdrant_client = QdrantClient(path="./qdrant_db")
     return qdrant_client
 
+class ChatTurn(BaseModel):
+    role: str
+    content: str
+
 class QueryRequest(BaseModel):
     query: str
+    history: list[ChatTurn] = []
 
 class TextUploadRequest(BaseModel):
     text: str
@@ -627,10 +632,54 @@ async def upload_text(payload: TextUploadRequest):
         "total_chunks": total_chunks,
     }
 
+MAX_HISTORY_TURNS = 6
+MAX_HISTORY_CHARS = 600
+
+
+def _clean_history(turns):
+    """Keep the last few real user/assistant turns, trimmed so they stay cheap to send."""
+    cleaned = []
+    for turn in turns[-MAX_HISTORY_TURNS:]:
+        role = (turn.role or "").strip().lower()
+        text = (turn.content or "").strip()
+        if role in {"user", "assistant"} and text:
+            cleaned.append((role, text[:MAX_HISTORY_CHARS]))
+    return cleaned
+
+
+def _condense_question(history, question: str) -> str:
+    """Turn a follow-up like "what about its battery?" into a standalone search question."""
+    transcript = "\n".join(f"{'User' if role == 'user' else 'Assistant'}: {text}" for role, text in history)
+    prompt = CONDENSE_QUESTION_PROMPT.format(history=transcript, question=question)
+    try:
+        rewritten = _get_llm().invoke([HumanMessage(content=prompt)]).content.strip().strip('"').strip()
+    except Exception as e:
+        print(f"Notice: could not rewrite the follow-up question ({e}); using it as written.")
+        return question
+    return rewritten if rewritten and len(rewritten) < 500 else question
+
+
 @app.post("/query")
 async def query_document(req: QueryRequest):
+    # The embedding, Qdrant and Groq calls below are blocking, so they run in worker threads
+    # to keep the server responsive (e.g. to upload progress polls) while a question is answered.
+    history = _clean_history(req.history)
+    search_question = req.query
+    if history:
+        # Follow-up questions ("and its battery?") only make sense with the earlier turns,
+        # so search with a standalone version of the question.
+        search_question = await run_in_threadpool(_condense_question, history, req.query)
+        if search_question != req.query:
+            print(f"Follow-up rewritten for search: {search_question!r}")
     try:
-        query_vector = get_embedding(req.query)
+        query_vector = await run_in_threadpool(get_embedding, search_question)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="The embedding provider is rate limiting requests right now. Wait a minute and try again.",
+            )
+        raise HTTPException(status_code=500, detail=f"Error embedding query: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error embedding query: {e}")
     try:
@@ -664,10 +713,10 @@ async def query_document(req: QueryRequest):
         instructions=f"DOCUMENT CONTEXT:\n{context}\n\nUser Query: {req.query}\n\nProvide a concise answer in 2-5 sentences."
     )
     
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Query: {req.query}"),
-    ]
+    messages = [SystemMessage(content=system_prompt)]
+    for role, text in history:
+        messages.append(HumanMessage(content=text) if role == "user" else AIMessage(content=text))
+    messages.append(HumanMessage(content=f"Query: {req.query}"))
 
     try:
         llm_instance = _get_llm()

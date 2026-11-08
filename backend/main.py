@@ -503,6 +503,8 @@ def _index_documents(docs, source_name: str, upload_type: str, job_id=None):
 
 def _search_qdrant(query_vector, top_k: int):
     client = _get_qdrant_client()
+    if not client.collection_exists(collection_name=QDRANT_COLLECTION):
+        return None  # nothing has been indexed yet (or everything was cleared)
     response = client.query_points(
         collection_name=QDRANT_COLLECTION,
         query=query_vector,
@@ -510,6 +512,40 @@ def _search_qdrant(query_vector, top_k: int):
         with_payload=True,
     )
     return getattr(response, "points", response)
+
+def _collect_sources(client):
+    """Every source in the collection with its chunk count (the database is the source of truth)."""
+    if not client.collection_exists(collection_name=QDRANT_COLLECTION):
+        return []
+    found: dict[str, dict] = {}
+    offset = None
+    for _ in range(500):  # safety cap, ~500k chunks
+        points, offset = client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            limit=1000,
+            offset=offset,
+            with_payload=["source_name", "upload_type"],
+            with_vectors=False,
+        )
+        for point in points:
+            payload = point.payload or {}
+            name = payload.get("source_name")
+            if not name:
+                continue
+            entry = found.setdefault(name, {"name": name, "type": payload.get("upload_type") or "text", "chunks": 0})
+            entry["chunks"] += 1
+        if offset is None:
+            break
+    return sorted(found.values(), key=lambda s: s["name"].lower())
+
+@app.get("/sources")
+async def list_sources():
+    client = _get_qdrant_client()
+    try:
+        sources = await run_in_threadpool(_collect_sources, client)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list sources: {e}")
+    return {"sources": sources}
 
 class DeleteSourceRequest(BaseModel):
     source_name: str
@@ -687,6 +723,9 @@ async def query_document(req: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error searching Qdrant: {e}")
 
+    if search_result is None:
+        return {"answer": "No documents are indexed yet. Add a source first, then ask your question."}
+
     if not search_result:
         return {"answer": "No relevant information found. Try a better question."}
 
@@ -737,5 +776,5 @@ async def query_document(req: QueryRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("PORT", "10000"))
+    port = int(os.environ.get("PORT", "8000"))  # same default as `uvicorn main:app --port 8000`
     uvicorn.run("main:app", host="0.0.0.0", port=port)
